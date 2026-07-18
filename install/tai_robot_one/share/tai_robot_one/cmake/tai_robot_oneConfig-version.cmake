@@ -1,1 +1,0 @@
-/home/admin/tai_robot_one/build/tai_robot_one/ament_cmake_core/tai_robot_oneConfig-version.cmake

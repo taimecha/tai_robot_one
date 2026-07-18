@@ -1,8 +1,0 @@
-source;share/tai_robot_one/hook/cmake_prefix_path.ps1
-source;share/tai_robot_one/hook/cmake_prefix_path.dsv
-source;share/tai_robot_one/hook/cmake_prefix_path.sh
-source;share/tai_robot_one/local_setup.bash
-source;share/tai_robot_one/local_setup.dsv
-source;share/tai_robot_one/local_setup.ps1
-source;share/tai_robot_one/local_setup.sh
-source;share/tai_robot_one/local_setup.zsh
