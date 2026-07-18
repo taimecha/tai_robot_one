@@ -1,0 +1,9 @@
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/uninstall.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/tai_robot_one_uninstall.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/test.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/edit_cache.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/rebuild_cache.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/list_install_components.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/install.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/install/local.dir
+/home/admin/tai_robot_one/build/tai_robot_one/CMakeFiles/install/strip.dir

@@ -1,0 +1,1 @@
+/home/admin/tai_robot_one/build/tai_robot_one/ament_cmake_environment_hooks/local_setup.sh

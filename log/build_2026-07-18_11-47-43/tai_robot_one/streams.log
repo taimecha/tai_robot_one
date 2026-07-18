@@ -1,0 +1,59 @@
+[0.012s] Invoking command in '/home/admin/tai_robot_one/build/tai_robot_one': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/jazzy /usr/bin/cmake /home/admin/tai_robot_one/ros2_ws -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/admin/tai_robot_one/install/tai_robot_one
+[0.114s] -- The C compiler identification is GNU 13.3.0
+[0.217s] -- The CXX compiler identification is GNU 13.3.0
+[0.244s] -- Detecting C compiler ABI info
+[0.398s] -- Detecting C compiler ABI info - done
+[0.415s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.416s] -- Detecting C compile features
+[0.417s] -- Detecting C compile features - done
+[0.434s] -- Detecting CXX compiler ABI info
+[0.616s] -- Detecting CXX compiler ABI info - done
+[0.631s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.632s] -- Detecting CXX compile features
+[0.633s] -- Detecting CXX compile features - done
+[0.636s] -- Found ament_cmake: 2.5.6 (/opt/ros/jazzy/share/ament_cmake/cmake)
+[0.858s] -- Found Python3: /usr/bin/python3 (found version "3.12.3") found components: Interpreter 
+[0.980s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[1.012s] -- Found ament_lint_auto: 0.17.5 (/opt/ros/jazzy/share/ament_lint_auto/cmake)
+[1.180s] -- Added test 'copyright' to check source files copyright and LICENSE
+[1.313s] -- Added test 'cppcheck' to perform static code analysis on C / C++ code
+[1.313s] -- Configured cppcheck include dirs: 
+[1.313s] -- Configured cppcheck exclude dirs and/or files: 
+[1.446s] -- Added test 'cpplint' to check C / C++ code against the Google style
+[1.446s] -- Configured cpplint exclude dirs and/or files: 
+[1.463s] -- Added test 'flake8' to check Python code syntax and style conventions
+[1.463s] -- Configured 'flake8' exclude dirs and/or files: 
+[1.496s] -- Added test 'lint_cmake' to check CMake code style
+[1.514s] -- Added test 'pep257' to check Python code against some of the docstring style conventions in PEP 257
+[1.645s] -- Added test 'uncrustify' to check C / C++ code style
+[1.646s] -- Configured uncrustify additional arguments: 
+[1.663s] -- Added test 'xmllint' to check XML markup files
+[1.665s] -- Configuring done (1.6s)
+[1.670s] -- Generating done (0.0s)
+[1.672s] -- Build files have been written to: /home/admin/tai_robot_one/build/tai_robot_one
+[1.682s] Invoked command in '/home/admin/tai_robot_one/build/tai_robot_one' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/jazzy /usr/bin/cmake /home/admin/tai_robot_one/ros2_ws -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/admin/tai_robot_one/install/tai_robot_one
+[1.685s] Invoking command in '/home/admin/tai_robot_one/build/tai_robot_one': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/jazzy /usr/bin/cmake --build /home/admin/tai_robot_one/build/tai_robot_one -- -j4 -l4
+[1.752s] Invoked command in '/home/admin/tai_robot_one/build/tai_robot_one' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/jazzy /usr/bin/cmake --build /home/admin/tai_robot_one/build/tai_robot_one -- -j4 -l4
+[1.768s] Invoking command in '/home/admin/tai_robot_one/build/tai_robot_one': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/jazzy /usr/bin/cmake --install /home/admin/tai_robot_one/build/tai_robot_one
+[1.781s] -- Install configuration: ""
+[1.782s] -- Execute custom install script
+[1.782s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/config/empty.yaml
+[1.800s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/description/robot.urdf.xacro
+[1.816s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/launch/rsp.launch.py
+[1.833s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/worlds/empty.world
+[1.854s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/ament_index/resource_index/package_run_dependencies/tai_robot_one
+[1.869s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/ament_index/resource_index/parent_prefix_path/tai_robot_one
+[1.884s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/environment/ament_prefix_path.sh
+[1.899s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/environment/ament_prefix_path.dsv
+[1.915s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/environment/path.sh
+[1.930s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/environment/path.dsv
+[1.946s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/local_setup.bash
+[1.961s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/local_setup.sh
+[1.976s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/local_setup.zsh
+[1.992s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/local_setup.dsv
+[2.007s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/package.dsv
+[2.024s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/ament_index/resource_index/packages/tai_robot_one
+[2.039s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/cmake/tai_robot_oneConfig.cmake
+[2.056s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/cmake/tai_robot_oneConfig-version.cmake
+[2.072s] -- Symlinking: /home/admin/tai_robot_one/install/tai_robot_one/share/tai_robot_one/package.xml
+[2.090s] Invoked command in '/home/admin/tai_robot_one/build/tai_robot_one' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/jazzy /usr/bin/cmake --install /home/admin/tai_robot_one/build/tai_robot_one

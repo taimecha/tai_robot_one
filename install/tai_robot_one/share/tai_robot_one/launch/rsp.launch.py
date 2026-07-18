@@ -1,0 +1,1 @@
+/home/admin/tai_robot_one/ros2_ws/launch/rsp.launch.py
