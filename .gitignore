@@ -1,14 +1,8 @@
-# Chặn rác của ROS 2
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
-
-# Chặn rác của PlatformIO (ESP32)
 esp32_firmware/.pio/
 esp32_firmware/.vscode/
-
-# Chặn rác hệ thống và Python
-.venv/
 __pycache__/
 *.pyc
 .DS_Store
