@@ -1,0 +1,413 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:include filename="inertial_macros.xacro"/>
+    <xacro:include filename="forklift.xacro"/>
+    <xacro:include filename="imu_bno055.xacro"/>
+    <xacro:include filename="gazebo_control.xacro"/>
+    <xacro:include filename="battery_pack.xacro"/>
+
+    <!-- All dimensions are in metres and all masses are in kilograms. -->
+    <xacro:property name="chassis_length" value="0.605"/>
+    <xacro:property name="chassis_width" value="0.290"/>
+    <xacro:property name="chassis_height" value="0.210"/>
+    <xacro:property name="chassis_bottom_clearance" value="0.125"/>
+    <xacro:property name="chassis_mass" value="40.0"/>
+
+    <xacro:property name="wheelbase" value="0.355"/>
+    <xacro:property name="wheel_track" value="0.428"/>
+    <xacro:property name="wheel_radius" value="0.0875"/>
+    <xacro:property name="wheel_width" value="0.035"/>
+    <!-- Estimated total mass of one rubber-tyred, plastic-rim wheel. -->
+    <xacro:property name="wheel_mass" value="0.5"/>
+    <!-- Visual estimate only; update this when the actual rim is measured. -->
+    <xacro:property name="rim_radius" value="0.055"/>
+
+    <!-- Dry rough ceramic tile: longitudinal grip and reduced lateral grip
+         for four-wheel skid-steer turning. These require real-world tuning. -->
+    <xacro:property name="tire_ground_mu_longitudinal" value="0.85"/>
+    <xacro:property name="tire_ground_mu_lateral" value="0.45"/>
+
+    <!-- MGL42GM-895, 24 V / 100 RPM (100:1 gearbox), from the supplied drawing. -->
+    <xacro:property name="motor_body_length" value="0.072"/>
+    <xacro:property name="motor_body_radius" value="0.025"/>
+    <xacro:property name="gearbox_length" value="0.0535"/>
+    <xacro:property name="gearbox_radius" value="0.021"/>
+    <xacro:property name="motor_total_length"
+                    value="${motor_body_length + gearbox_length}"/>
+    <xacro:property name="motor_mass" value="0.895"/>
+    <xacro:property name="motor_shaft_length" value="0.025"/>
+    <xacro:property name="motor_shaft_radius" value="0.005"/>
+
+    <!-- 42-series cast-iron motor bracket from the supplied drawing. -->
+    <xacro:property name="bracket_width" value="0.050"/>
+    <xacro:property name="bracket_base_length" value="0.070"/>
+    <xacro:property name="bracket_height" value="0.060"/>
+    <xacro:property name="bracket_thickness" value="0.003"/>
+    <xacro:property name="bracket_mass" value="0.123"/>
+
+    <!-- 2GT-36T pulley: 10 mm bore, 6 mm belt, supplied dimensions. -->
+    <xacro:property name="pulley_width" value="0.016"/>
+    <xacro:property name="pulley_hub_width" value="0.009"/>
+    <xacro:property name="pulley_tooth_width" value="0.007"/>
+    <xacro:property name="pulley_hub_radius" value="0.00875"/>
+    <xacro:property name="pulley_tooth_radius" value="0.011205"/>
+    <xacro:property name="pulley_flange_radius" value="0.0125"/>
+    <xacro:property name="pulley_flange_width" value="0.001"/>
+    <!-- Tiny visual-only overlap prevents coplanar faces from flickering in RViz. -->
+    <xacro:property name="visual_overlap" value="0.0002"/>
+
+    <!-- TS7C-style 10-to-10 mm clamp coupling: OD 20 mm, length 25 mm. -->
+    <xacro:property name="coupler_radius" value="0.010"/>
+    <xacro:property name="coupler_length" value="0.025"/>
+    <xacro:property name="wheel_inner_face_from_center" value="${wheel_width / 2}"/>
+    <xacro:property name="chassis_side_to_wheel_inner_face"
+                    value="${wheel_track / 2 - chassis_width / 2 - wheel_width / 2}"/>
+    <!-- Exposed 10 mm wheel shaft between the coupling and the wheel. -->
+    <xacro:property name="wheel_axle_radius" value="0.005"/>
+    <xacro:property name="wheel_axle_length"
+                    value="${chassis_side_to_wheel_inner_face - pulley_width - coupler_length}"/>
+
+    <xacro:property name="chassis_center_z"
+                    value="${chassis_bottom_clearance + chassis_height / 2}"/>
+    <xacro:property name="chassis_z_from_base_link"
+                    value="${chassis_center_z - wheel_radius}"/>
+    <xacro:property name="chassis_bottom_from_base_link"
+                    value="${chassis_bottom_clearance - wheel_radius}"/>
+
+    <material name="chassis_white">
+        <color rgba="0.85 0.85 0.85 1"/>
+    </material>
+
+    <material name="rubber_black">
+        <color rgba="0.03 0.03 0.03 1"/>
+    </material>
+
+    <material name="wheel_marker_yellow">
+        <color rgba="0.95 0.72 0.05 1"/>
+    </material>
+
+    <material name="plastic_rim">
+        <color rgba="0.18 0.25 0.35 1"/>
+    </material>
+
+    <material name="motor_silver">
+        <color rgba="0.62 0.64 0.66 1"/>
+    </material>
+
+    <material name="gearbox_black">
+        <color rgba="0.06 0.06 0.07 1"/>
+    </material>
+
+    <material name="bracket_black">
+        <color rgba="0.04 0.04 0.04 1"/>
+    </material>
+
+    <material name="aluminium">
+        <color rgba="0.72 0.74 0.76 1"/>
+    </material>
+
+    <material name="steel_dark">
+        <color rgba="0.25 0.27 0.29 1"/>
+    </material>
+
+    <!-- Ground projection at the geometric centre of the vehicle. -->
+    <link name="base_footprint"/>
+
+    <!-- Main robot frame at wheel-axle height. -->
+    <joint name="base_footprint_joint" type="fixed">
+        <parent link="base_footprint"/>
+        <child link="base_link"/>
+        <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
+    </joint>
+
+    <link name="base_link"/>
+
+    <!-- Chassis: 605 x 290 x 210 mm, with its bottom 125 mm above ground. -->
+    <joint name="chassis_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="chassis"/>
+        <origin xyz="0 0 ${chassis_z_from_base_link}" rpy="0 0 0"/>
+    </joint>
+
+    <link name="chassis">
+        <visual>
+            <geometry>
+                <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+            </geometry>
+            <material name="chassis_white"/>
+        </visual>
+        <collision>
+            <geometry>
+                <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+            </geometry>
+        </collision>
+        <xacro:inertial_box mass="${chassis_mass}"
+                            x="${chassis_length}"
+                            y="${chassis_width}"
+                            z="${chassis_height}">
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+        </xacro:inertial_box>
+    </link>
+
+    <!-- One fixed motor and L bracket. side=1 is left; side=-1 is right. -->
+    <xacro:macro name="drive_hardware" params="position x side">
+        <joint name="${position}_bracket_joint" type="fixed">
+            <parent link="base_link"/>
+            <child link="${position}_bracket"/>
+            <origin xyz="${x} 0 0" rpy="0 0 0"/>
+        </joint>
+
+        <link name="${position}_bracket">
+            <!-- Horizontal 50 x 70 x 3 mm plate, bolted below the chassis. -->
+            <visual name="bracket_base_visual">
+                <origin xyz="0 ${side * (chassis_width / 2 - bracket_base_length / 2)}
+                                ${chassis_bottom_from_base_link - bracket_thickness / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${bracket_width} ${bracket_base_length} ${bracket_thickness}"/>
+                </geometry>
+                <material name="bracket_black"/>
+            </visual>
+            <collision name="bracket_base_collision">
+                <origin xyz="0 ${side * (chassis_width / 2 - bracket_base_length / 2)}
+                                ${chassis_bottom_from_base_link - bracket_thickness / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${bracket_width} ${bracket_base_length} ${bracket_thickness}"/>
+                </geometry>
+            </collision>
+
+            <!-- Vertical 50 x 60 x 3 mm motor mounting plate. -->
+            <visual name="bracket_vertical_visual">
+                <origin xyz="0 ${side * (chassis_width / 2 + bracket_thickness / 2)}
+                                ${chassis_bottom_from_base_link - bracket_height / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${bracket_width} ${bracket_thickness} ${bracket_height}"/>
+                </geometry>
+                <material name="bracket_black"/>
+            </visual>
+            <collision name="bracket_vertical_collision">
+                <origin xyz="0 ${side * (chassis_width / 2 + bracket_thickness / 2)}
+                                ${chassis_bottom_from_base_link - bracket_height / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${bracket_width} ${bracket_thickness} ${bracket_height}"/>
+                </geometry>
+            </collision>
+
+            <!-- Approximate inertia for the complete 123 g L bracket. -->
+            <xacro:inertial_box mass="${bracket_mass}"
+                                x="${bracket_width}"
+                                y="${bracket_base_length}"
+                                z="${bracket_height}">
+                <origin xyz="0 ${side * 0.127} 0.023" rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+
+        <joint name="${position}_motor_joint" type="fixed">
+            <parent link="base_link"/>
+            <child link="${position}_motor"/>
+            <origin xyz="${x} 0 0" rpy="0 0 0"/>
+        </joint>
+
+        <link name="${position}_motor">
+            <!-- 42 mm diameter planetary gearbox nearest the output shaft. -->
+            <visual name="gearbox_visual">
+                <origin xyz="0 ${side * (chassis_width / 2 - gearbox_length / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${gearbox_radius}" length="${gearbox_length}"/>
+                </geometry>
+                <material name="gearbox_black"/>
+            </visual>
+            <collision name="gearbox_collision">
+                <origin xyz="0 ${side * (chassis_width / 2 - gearbox_length / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${gearbox_radius}" length="${gearbox_length}"/>
+                </geometry>
+            </collision>
+
+            <!-- 895 motor body: 50 mm diameter and 72 mm long. -->
+            <visual name="motor_body_visual">
+                <origin xyz="0 ${side * (chassis_width / 2 - gearbox_length - motor_body_length / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${motor_body_radius}" length="${motor_body_length}"/>
+                </geometry>
+                <material name="motor_silver"/>
+            </visual>
+            <collision name="motor_body_collision">
+                <origin xyz="0 ${side * (chassis_width / 2 - gearbox_length - motor_body_length / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${motor_body_radius}" length="${motor_body_length}"/>
+                </geometry>
+            </collision>
+
+            <!-- Lumped approximation for the complete 895 g gearmotor. -->
+            <xacro:inertial_cylinder mass="${motor_mass}"
+                                      length="${motor_total_length}"
+                                      radius="${motor_body_radius}">
+                <origin xyz="0 ${side * (chassis_width / 2 - motor_total_length / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+            </xacro:inertial_cylinder>
+        </link>
+    </xacro:macro>
+
+    <!--
+      One independently driven wheel. The wheel cylinder's native axis is Z,
+      so its visual, collision and inertial frames are rotated onto the Y axis.
+    -->
+    <xacro:macro name="drive_wheel" params="position x y side">
+        <joint name="${position}_wheel_joint" type="continuous">
+            <parent link="base_link"/>
+            <child link="${position}_wheel"/>
+            <origin xyz="${x} ${y} 0" rpy="0 0 0"/>
+            <axis xyz="0 1 0"/>
+            <dynamics damping="0.1" friction="0.1"/>
+        </joint>
+
+        <link name="${position}_wheel">
+            <!-- Rubber tyre. -->
+            <visual name="tyre_visual">
+                <origin xyz="0 0 0" rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+                </geometry>
+                <material name="rubber_black"/>
+            </visual>
+
+            <!-- Plastic rim, made slightly wider so that its faces are visible. -->
+            <visual name="rim_visual">
+                <origin xyz="0 0 0" rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${rim_radius}" length="${wheel_width + 0.002}"/>
+                </geometry>
+                <material name="plastic_rim"/>
+            </visual>
+
+            <!-- Asymmetric marker makes wheel rotation visible in RViz. -->
+            <visual name="rotation_marker_visual">
+                <origin xyz="${wheel_radius * 0.62} 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${wheel_radius * 0.55}
+                               ${wheel_width + 0.003} 0.008"/>
+                </geometry>
+                <material name="wheel_marker_yellow"/>
+            </visual>
+
+            <!-- GT2 pulley: hub first, then the 36-tooth belt section. -->
+            <visual name="pulley_hub_visual">
+                <origin xyz="0 ${-side * (wheel_track / 2 - chassis_width / 2 - pulley_hub_width / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${pulley_hub_radius}"
+                              length="${pulley_hub_width + visual_overlap}"/>
+                </geometry>
+                <material name="aluminium"/>
+            </visual>
+            <visual name="pulley_teeth_visual">
+                <origin xyz="0 ${-side * (wheel_track / 2 - chassis_width / 2 - pulley_hub_width - pulley_tooth_width / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${pulley_tooth_radius}"
+                              length="${pulley_tooth_width + 2 * visual_overlap}"/>
+                </geometry>
+                <material name="aluminium"/>
+            </visual>
+            <visual name="pulley_inner_flange_visual">
+                <origin xyz="0 ${-side * (wheel_track / 2 - chassis_width / 2 - pulley_hub_width - pulley_flange_width / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${pulley_flange_radius}" length="${pulley_flange_width}"/>
+                </geometry>
+                <material name="aluminium"/>
+            </visual>
+            <visual name="pulley_outer_flange_visual">
+                <origin xyz="0 ${-side * (wheel_track / 2 - chassis_width / 2 - pulley_width + pulley_flange_width / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${pulley_flange_radius}" length="${pulley_flange_width}"/>
+                </geometry>
+                <material name="aluminium"/>
+            </visual>
+
+            <!-- 10-to-10 mm clamp coupling between pulley and wheel. -->
+            <visual name="coupler_visual">
+                <origin xyz="0 ${-side * (wheel_track / 2 - chassis_width / 2 - pulley_width - coupler_length / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${coupler_radius}"
+                              length="${coupler_length + 2 * visual_overlap}"/>
+                </geometry>
+                <material name="aluminium"/>
+            </visual>
+
+            <!-- Only the exposed part of the 10 mm wheel shaft is rendered. -->
+            <visual name="wheel_axle_visual">
+                <origin xyz="0 ${-side * (wheel_width / 2 + wheel_axle_length / 2)} 0"
+                        rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${wheel_axle_radius}"
+                              length="${wheel_axle_length + 2 * visual_overlap}"/>
+                </geometry>
+                <material name="steel_dark"/>
+            </visual>
+
+            <collision>
+                <origin xyz="0 0 0" rpy="${pi / 2} 0 0"/>
+                <geometry>
+                    <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+                </geometry>
+            </collision>
+
+            <xacro:inertial_cylinder mass="${wheel_mass}"
+                                      length="${wheel_width}"
+                                      radius="${wheel_radius}">
+                <origin xyz="0 0 0" rpy="${pi / 2} 0 0"/>
+            </xacro:inertial_cylinder>
+        </link>
+
+        <!-- Explicit anisotropic tyre friction for Gazebo Harmonic. -->
+        <gazebo reference="${position}_wheel">
+            <mu1>${tire_ground_mu_longitudinal}</mu1>
+            <mu2>${tire_ground_mu_lateral}</mu2>
+            <fdir1>1 0 0</fdir1>
+        </gazebo>
+    </xacro:macro>
+
+    <!-- Wheelbase 355 mm; centre-to-centre track width 428 mm. -->
+    <xacro:drive_hardware position="front_left"
+                          x="${wheelbase / 2}" side="${1}"/>
+    <xacro:drive_hardware position="front_right"
+                          x="${wheelbase / 2}" side="${-1}"/>
+    <xacro:drive_hardware position="rear_left"
+                          x="${-wheelbase / 2}" side="${1}"/>
+    <xacro:drive_hardware position="rear_right"
+                          x="${-wheelbase / 2}" side="${-1}"/>
+
+    <xacro:drive_wheel position="front_left"
+                       x="${wheelbase / 2}" y="${wheel_track / 2}" side="${1}"/>
+    <xacro:drive_wheel position="front_right"
+                       x="${wheelbase / 2}" y="${-wheel_track / 2}" side="${-1}"/>
+    <xacro:drive_wheel position="rear_left"
+                       x="${-wheelbase / 2}" y="${wheel_track / 2}" side="${1}"/>
+    <xacro:drive_wheel position="rear_right"
+                       x="${-wheelbase / 2}" y="${-wheel_track / 2}" side="${-1}"/>
+
+    <!-- Front lift mast and the 0-520 mm prismatic fork mechanism. -->
+    <xacro:forklift_assembly parent="base_link"/>
+
+    <!-- BNO055 mounted near the centre of the chassis top surface. -->
+    <xacro:bno055_imu parent="chassis" x="0.0" y="0.0" yaw="0.0"/>
+
+    <!-- Rear-mounted 8S2P 32140 LiFePO4 battery inside the chassis. -->
+    <xacro:lfp_battery_pack parent="chassis"/>
+
+    <!-- Native Gazebo Harmonic drive, lift and joint-state systems. -->
+    <xacro:gazebo_control_plugins/>
+
+</robot>

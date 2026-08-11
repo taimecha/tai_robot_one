@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+
+"""Keyboard teleoperation for the simulated skid-steer base and lift."""
+
+import select
+import sys
+import termios
+import time
+import tty
+
+from geometry_msgs.msg import Twist
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64
+
+
+HELP = """
+Điều khiển mô phỏng TAI Robot One
+---------------------------------
+Giữ W : tiến             Giữ S : lùi
+Giữ A : quay trái        Giữ D : quay phải
+Space : dừng bánh
+
+R : nâng càng 2 cm       F : hạ càng 2 cm
+T : nâng tối đa 52 cm    G : hạ về 0 cm
+
+Q : dừng robot và thoát
+"""
+
+
+class KeyboardTeleop(Node):
+    """Publish manual velocity and bounded lift-position commands."""
+
+    def __init__(self):
+        super().__init__('keyboard_teleop')
+
+        self.declare_parameter('linear_speed', 0.25)
+        self.declare_parameter('angular_speed', 0.80)
+        self.declare_parameter('lift_step', 0.02)
+        self.declare_parameter('lift_min', 0.0)
+        self.declare_parameter('lift_max', 0.52)
+        self.declare_parameter('deadman_timeout', 0.75)
+        self.declare_parameter('publish_rate', 20.0)
+
+        self.linear_speed = float(self.get_parameter('linear_speed').value)
+        self.angular_speed = float(self.get_parameter('angular_speed').value)
+        self.lift_step = float(self.get_parameter('lift_step').value)
+        self.lift_min = float(self.get_parameter('lift_min').value)
+        self.lift_max = float(self.get_parameter('lift_max').value)
+        self.deadman_timeout = float(
+            self.get_parameter('deadman_timeout').value)
+        self.publish_rate = float(self.get_parameter('publish_rate').value)
+
+        if not 0.0 <= self.lift_min < self.lift_max <= 0.52:
+            raise ValueError('lift limits must stay inside [0.0, 0.52] m')
+        if self.publish_rate <= 0.0 or self.deadman_timeout <= 0.0:
+            raise ValueError('publish_rate and deadman_timeout must be positive')
+
+        self.cmd_vel_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.lift_publisher = self.create_publisher(
+            Float64, '/lift_position', 10)
+        self.joint_state_subscription = self.create_subscription(
+            JointState,
+            '/joint_states',
+            self.joint_state_callback,
+            qos_profile_sensor_data,
+        )
+
+        self.linear = 0.0
+        self.angular = 0.0
+        self.lift_target = self.lift_min
+        self.lift_command_active = False
+        self.last_drive_key = 0.0
+        self.running = True
+
+    def joint_state_callback(self, message):
+        """Initialize the lift target from Gazebo instead of forcing it to 0."""
+        if self.lift_command_active:
+            return
+        try:
+            index = message.name.index('lift_joint')
+        except ValueError:
+            return
+        if index < len(message.position):
+            self.lift_target = min(
+                self.lift_max,
+                max(self.lift_min, message.position[index]))
+
+    def process_key(self, key):
+        now = time.monotonic()
+        if key == 'w':
+            self.linear, self.angular = self.linear_speed, 0.0
+            self.last_drive_key = now
+        elif key == 's':
+            self.linear, self.angular = -self.linear_speed, 0.0
+            self.last_drive_key = now
+        elif key == 'a':
+            self.linear, self.angular = 0.0, self.angular_speed
+            self.last_drive_key = now
+        elif key == 'd':
+            self.linear, self.angular = 0.0, -self.angular_speed
+            self.last_drive_key = now
+        elif key == ' ':
+            self.linear, self.angular = 0.0, 0.0
+        elif key == 'r':
+            self.lift_command_active = True
+            self.lift_target = min(
+                self.lift_max, self.lift_target + self.lift_step)
+        elif key == 'f':
+            self.lift_command_active = True
+            self.lift_target = max(
+                self.lift_min, self.lift_target - self.lift_step)
+        elif key == 't':
+            self.lift_command_active = True
+            self.lift_target = self.lift_max
+        elif key == 'g':
+            self.lift_command_active = True
+            self.lift_target = self.lift_min
+        elif key in ('q', '\x03'):
+            self.linear, self.angular = 0.0, 0.0
+            self.running = False
+
+    def apply_deadman(self):
+        if self.linear == 0.0 and self.angular == 0.0:
+            return
+        if time.monotonic() - self.last_drive_key > self.deadman_timeout:
+            self.linear, self.angular = 0.0, 0.0
+
+    def publish(self):
+        twist = Twist()
+        twist.linear.x = self.linear
+        twist.angular.z = self.angular
+        self.cmd_vel_publisher.publish(twist)
+
+        if self.lift_command_active:
+            lift = Float64()
+            lift.data = self.lift_target
+            self.lift_publisher.publish(lift)
+
+    def status(self):
+        return (
+            f'V={self.linear:+.2f} m/s  W={self.angular:+.2f} rad/s  '
+            f'Lift={self.lift_target:.2f} m')
+
+
+def read_key(timeout):
+    readable, _, _ = select.select([sys.stdin], [], [], timeout)
+    if readable:
+        return sys.stdin.read(1).lower()
+    return ''
+
+
+def main(args=None):
+    if not sys.stdin.isatty():
+        raise RuntimeError('keyboard_teleop must run in an interactive terminal')
+
+    rclpy.init(args=args)
+    node = KeyboardTeleop()
+    original_terminal = termios.tcgetattr(sys.stdin)
+    period = 1.0 / node.publish_rate
+
+    print(HELP)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        while rclpy.ok() and node.running:
+            key = read_key(period)
+            if key:
+                node.process_key(key)
+            node.apply_deadman()
+            node.publish()
+            rclpy.spin_once(node, timeout_sec=0.0)
+            sys.stdout.write('\r' + node.status() + '   ')
+            sys.stdout.flush()
+    finally:
+        node.linear, node.angular = 0.0, 0.0
+        node.publish()
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal)
+        print('\nĐã dừng robot.')
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

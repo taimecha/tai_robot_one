@@ -1,0 +1,93 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!--
+      8S2P pack made from sixteen cylindrical 32140 LiFePO4 cells.
+      Electrical estimate: 25.6 V nominal, 30 Ah, approximately 768 Wh.
+
+      A common generic 32140 cell is approximately 295 g. The enclosure,
+      BMS, bus bars and wiring mass and the outside dimensions below are
+      estimates until the completed pack is measured.
+    -->
+    <xacro:property name="battery_cell_count" value="16"/>
+    <xacro:property name="battery_cell_mass" value="0.295"/>
+    <xacro:property name="battery_aux_mass" value="0.800"/>
+    <xacro:property name="battery_pack_mass"
+                    value="${battery_cell_count * battery_cell_mass + battery_aux_mass}"/>
+
+    <!-- Estimated 4 x 4 vertical-cell enclosure. -->
+    <xacro:property name="battery_pack_length" value="0.160"/>
+    <xacro:property name="battery_pack_width" value="0.160"/>
+    <xacro:property name="battery_pack_height" value="0.170"/>
+    <xacro:property name="battery_rear_clearance" value="0.020"/>
+    <xacro:property name="battery_bottom_clearance" value="0.015"/>
+
+    <material name="battery_case_black">
+        <color rgba="0.055 0.065 0.060 1"/>
+    </material>
+
+    <material name="battery_terminal_red">
+        <color rgba="0.72 0.04 0.03 1"/>
+    </material>
+
+    <material name="battery_terminal_blue">
+        <color rgba="0.03 0.12 0.72 1"/>
+    </material>
+
+    <xacro:macro name="lfp_battery_pack" params="parent">
+        <!-- Pack is inside the rear half of the chassis. -->
+        <joint name="battery_pack_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="battery_pack"/>
+            <origin xyz="${-chassis_length / 2 + battery_rear_clearance
+                           + battery_pack_length / 2}
+                         0
+                         ${-chassis_height / 2 + battery_bottom_clearance
+                           + battery_pack_height / 2}"
+                    rpy="0 0 0"/>
+        </joint>
+
+        <link name="battery_pack">
+            <visual name="battery_case_visual">
+                <geometry>
+                    <box size="${battery_pack_length} ${battery_pack_width}
+                               ${battery_pack_height}"/>
+                </geometry>
+                <material name="battery_case_black"/>
+            </visual>
+
+            <!-- Small top markers make pack polarity visible in RViz/Gazebo. -->
+            <visual name="battery_positive_terminal_visual">
+                <origin xyz="0.045 -0.050 ${battery_pack_height / 2 + 0.004}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="0.008" length="0.008"/>
+                </geometry>
+                <material name="battery_terminal_red"/>
+            </visual>
+            <visual name="battery_negative_terminal_visual">
+                <origin xyz="0.045 0.050 ${battery_pack_height / 2 + 0.004}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="0.008" length="0.008"/>
+                </geometry>
+                <material name="battery_terminal_blue"/>
+            </visual>
+
+            <collision name="battery_case_collision">
+                <geometry>
+                    <box size="${battery_pack_length} ${battery_pack_width}
+                               ${battery_pack_height}"/>
+                </geometry>
+            </collision>
+
+            <xacro:inertial_box mass="${battery_pack_mass}"
+                                x="${battery_pack_length}"
+                                y="${battery_pack_width}"
+                                z="${battery_pack_height}">
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+    </xacro:macro>
+
+</robot>

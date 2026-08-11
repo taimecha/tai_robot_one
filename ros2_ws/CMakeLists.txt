@@ -37,4 +37,11 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(
+  PROGRAMS
+    scripts/keyboard_teleop
+    scripts/test_robot_motion
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

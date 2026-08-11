@@ -1,0 +1,313 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!--
+      Simplified lifting mechanism measured from the real robot.
+      The vehicle forward direction is +X and the lift direction is +Z.
+
+      The 390 mm fork starts 65 mm in front of the chassis front face. The
+      complete distance from the chassis front face to the fork tip is 455 mm.
+    -->
+    <xacro:property name="fork_length" value="0.390"/>
+    <xacro:property name="fork_mount_offset" value="0.065"/>
+    <xacro:property name="fork_tip_from_chassis"
+                    value="${fork_mount_offset + fork_length}"/>
+
+    <xacro:property name="mast_width" value="0.260"/>
+    <xacro:property name="fork_pair_width" value="0.155"/>
+    <xacro:property name="fork_gap" value="0.049"/>
+    <xacro:property name="fork_width"
+                    value="${(fork_pair_width - fork_gap) / 2}"/>
+    <xacro:property name="fork_center_y"
+                    value="${fork_gap / 2 + fork_width / 2}"/>
+
+    <xacro:property name="lift_travel" value="0.520"/>
+    <!-- At lift_joint=0, the underside of each fork is 65 mm above ground. -->
+    <xacro:property name="fork_ground_clearance" value="0.065"/>
+
+    <!-- Dimensions below are visual estimates pending direct measurement. -->
+    <xacro:property name="mast_profile" value="0.030"/>
+    <xacro:property name="mast_height" value="0.680"/>
+    <!-- The underside of the aluminium mast is 55 mm above the ground. -->
+    <xacro:property name="mast_bottom_ground" value="0.055"/>
+    <xacro:property name="fork_thickness" value="0.008"/>
+    <!-- Mast rear face touches the chassis; this carriage fills the remaining
+         distance between the mast front face and the start of the forks. -->
+    <xacro:property name="carriage_depth"
+                    value="${fork_mount_offset - mast_profile}"/>
+    <xacro:property name="carriage_height" value="0.060"/>
+    <xacro:property name="guide_rod_radius" value="0.004"/>
+    <xacro:property name="guide_rod_y" value="0.085"/>
+    <xacro:property name="guide_housing_radius" value="0.009"/>
+    <xacro:property name="guide_housing_length" value="0.035"/>
+    <xacro:property name="guide_axis_x"
+                    value="${mast_profile / 2 + guide_housing_radius}"/>
+    <xacro:property name="shaft_support_depth" value="0.035"/>
+    <xacro:property name="shaft_support_width" value="0.028"/>
+    <xacro:property name="shaft_support_height" value="0.025"/>
+    <xacro:property name="guide_bottom_z"
+                    value="${mast_profile + shaft_support_height / 2}"/>
+    <xacro:property name="guide_top_z"
+                    value="${mast_height - mast_profile - shaft_support_height / 2}"/>
+    <xacro:property name="guide_rod_length"
+                    value="${guide_top_z - guide_bottom_z}"/>
+    <xacro:property name="guide_rod_center_z"
+                    value="${(guide_top_z + guide_bottom_z) / 2}"/>
+
+    <!-- Estimated masses; replace with measured values before dynamic simulation. -->
+    <xacro:property name="mast_mass" value="3.0"/>
+    <xacro:property name="moving_fork_mass" value="4.0"/>
+
+    <material name="extrusion_aluminium">
+        <color rgba="0.72 0.74 0.76 1"/>
+    </material>
+
+    <material name="fork_galvanized">
+        <color rgba="0.58 0.60 0.62 1"/>
+    </material>
+
+    <material name="lead_screw_steel">
+        <color rgba="0.32 0.34 0.36 1"/>
+    </material>
+
+    <material name="bearing_dark">
+        <color rgba="0.12 0.13 0.14 1"/>
+    </material>
+
+    <!-- SK8-style simplified end support for one guide shaft or lead screw. -->
+    <xacro:macro name="shaft_support_block" params="name y z">
+        <visual name="${name}_visual">
+            <origin xyz="${guide_axis_x} ${y} ${z}" rpy="0 0 0"/>
+            <geometry>
+                <box size="${shaft_support_depth}
+                           ${shaft_support_width}
+                           ${shaft_support_height}"/>
+            </geometry>
+            <material name="bearing_dark"/>
+        </visual>
+    </xacro:macro>
+
+    <xacro:macro name="forklift_assembly" params="parent">
+        <!-- Mast origin: centre of its lower horizontal aluminium profile. -->
+        <joint name="mast_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="mast_frame"/>
+            <origin xyz="${chassis_length / 2 + mast_profile / 2} 0
+                         ${mast_bottom_ground - wheel_radius}"
+                    rpy="0 0 0"/>
+        </joint>
+
+        <link name="mast_frame">
+            <!-- Left and right 30 x 30 mm aluminium profiles. -->
+            <visual name="mast_left_rail_visual">
+                <origin xyz="0 ${mast_width / 2 - mast_profile / 2}
+                             ${mast_height / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${mast_profile} ${mast_profile} ${mast_height}"/>
+                </geometry>
+                <material name="extrusion_aluminium"/>
+            </visual>
+            <visual name="mast_right_rail_visual">
+                <origin xyz="0 ${-(mast_width / 2 - mast_profile / 2)}
+                             ${mast_height / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${mast_profile} ${mast_profile} ${mast_height}"/>
+                </geometry>
+                <material name="extrusion_aluminium"/>
+            </visual>
+
+            <!-- Lower and upper cross-members complete the 260 mm-wide frame. -->
+            <visual name="mast_lower_crossbar_visual">
+                <origin xyz="0 0 ${mast_profile / 2}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${mast_profile} ${mast_width} ${mast_profile}"/>
+                </geometry>
+                <material name="extrusion_aluminium"/>
+            </visual>
+            <visual name="mast_upper_crossbar_visual">
+                <origin xyz="0 0 ${mast_height - mast_profile / 2}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${mast_profile} ${mast_width} ${mast_profile}"/>
+                </geometry>
+                <material name="extrusion_aluminium"/>
+            </visual>
+
+            <!-- Two vertical 8 mm guide rods and the central T8 lead screw. -->
+            <visual name="left_guide_rod_visual">
+                <origin xyz="${guide_axis_x} ${guide_rod_y} ${guide_rod_center_z}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${guide_rod_radius}"
+                              length="${guide_rod_length}"/>
+                </geometry>
+                <material name="lead_screw_steel"/>
+            </visual>
+            <visual name="right_guide_rod_visual">
+                <origin xyz="${guide_axis_x} ${-guide_rod_y} ${guide_rod_center_z}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${guide_rod_radius}"
+                              length="${guide_rod_length}"/>
+                </geometry>
+                <material name="lead_screw_steel"/>
+            </visual>
+            <visual name="t8_lead_screw_visual">
+                <origin xyz="${guide_axis_x} 0 ${guide_rod_center_z}" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${guide_rod_radius}"
+                              length="${guide_rod_length}"/>
+                </geometry>
+                <material name="lead_screw_steel"/>
+            </visual>
+
+            <!-- End supports prevent all three shafts from appearing unsupported. -->
+            <xacro:shaft_support_block name="left_guide_lower_support"
+                                       y="${guide_rod_y}" z="${guide_bottom_z}"/>
+            <xacro:shaft_support_block name="left_guide_upper_support"
+                                       y="${guide_rod_y}" z="${guide_top_z}"/>
+            <xacro:shaft_support_block name="right_guide_lower_support"
+                                       y="${-guide_rod_y}" z="${guide_bottom_z}"/>
+            <xacro:shaft_support_block name="right_guide_upper_support"
+                                       y="${-guide_rod_y}" z="${guide_top_z}"/>
+            <xacro:shaft_support_block name="lead_screw_lower_support"
+                                       y="0" z="${guide_bottom_z}"/>
+            <xacro:shaft_support_block name="lead_screw_upper_support"
+                                       y="0" z="${guide_top_z}"/>
+
+            <!-- A simple bounding collision keeps the mast inexpensive to simulate. -->
+            <collision name="mast_collision">
+                <origin xyz="0 0 ${mast_height / 2}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${mast_profile} ${mast_width} ${mast_height}"/>
+                </geometry>
+            </collision>
+
+            <xacro:inertial_box mass="${mast_mass}"
+                                x="${mast_profile}"
+                                y="${mast_width}"
+                                z="${mast_height}">
+                <origin xyz="0 0 ${mast_height / 2}" rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+
+        <!--
+          lift_joint position is the fork height above its lowest position.
+          The origin puts the underside of the forks 65 mm above the ground.
+        -->
+        <joint name="lift_joint" type="prismatic">
+            <parent link="mast_frame"/>
+            <child link="fork_carriage"/>
+            <origin xyz="${mast_profile / 2} 0
+                         ${fork_ground_clearance + fork_thickness / 2 - mast_bottom_ground}"
+                    rpy="0 0 0"/>
+            <axis xyz="0 0 1"/>
+            <limit lower="0.0" upper="${lift_travel}" effort="1000.0" velocity="0.05"/>
+            <dynamics damping="5.0" friction="2.0"/>
+        </joint>
+
+        <link name="fork_carriage">
+            <!-- Moving cross-member linking the two forks and lift guides. -->
+            <visual name="carriage_visual">
+                <origin xyz="${carriage_depth / 2} 0 ${carriage_height / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${carriage_depth} ${mast_width} ${carriage_height}"/>
+                </geometry>
+                <material name="fork_galvanized"/>
+            </visual>
+
+            <!-- Moving round bearing blocks on the two 8 mm guide rods. -->
+            <visual name="left_guide_housing_visual">
+                <origin xyz="${guide_axis_x - mast_profile / 2} ${guide_rod_y}
+                             ${guide_housing_length / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${guide_housing_radius}"
+                              length="${guide_housing_length}"/>
+                </geometry>
+                <material name="bearing_dark"/>
+            </visual>
+            <visual name="right_guide_housing_visual">
+                <origin xyz="${guide_axis_x - mast_profile / 2} ${-guide_rod_y}
+                             ${guide_housing_length / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${guide_housing_radius}"
+                              length="${guide_housing_length}"/>
+                </geometry>
+                <material name="bearing_dark"/>
+            </visual>
+
+            <!-- Simplified moving T8 nut block around the central lead screw. -->
+            <visual name="t8_nut_block_visual">
+                <origin xyz="${guide_axis_x - mast_profile / 2} 0 0.015"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="0.020 0.030 0.030"/>
+                </geometry>
+                <material name="fork_galvanized"/>
+            </visual>
+            <collision name="carriage_collision">
+                <origin xyz="${carriage_depth / 2} 0 ${carriage_height / 2}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${carriage_depth} ${mast_width} ${carriage_height}"/>
+                </geometry>
+            </collision>
+
+            <!--
+              Each 390 mm fork is 53 mm wide:
+              2 * 53 mm + 49 mm centre gap = 155 mm total width.
+              The rear edge is 65 mm in front of the chassis face; nothing
+              extends backwards into the chassis.
+            -->
+            <visual name="left_fork_visual">
+                <origin xyz="${carriage_depth + fork_length / 2}
+                             ${fork_center_y} 0"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${fork_length} ${fork_width} ${fork_thickness}"/>
+                </geometry>
+                <material name="fork_galvanized"/>
+            </visual>
+            <visual name="right_fork_visual">
+                <origin xyz="${carriage_depth + fork_length / 2}
+                             ${-fork_center_y} 0"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${fork_length} ${fork_width} ${fork_thickness}"/>
+                </geometry>
+                <material name="fork_galvanized"/>
+            </visual>
+            <collision name="left_fork_collision">
+                <origin xyz="${carriage_depth + fork_length / 2}
+                             ${fork_center_y} 0"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${fork_length} ${fork_width} ${fork_thickness}"/>
+                </geometry>
+            </collision>
+            <collision name="right_fork_collision">
+                <origin xyz="${carriage_depth + fork_length / 2}
+                             ${-fork_center_y} 0"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${fork_length} ${fork_width} ${fork_thickness}"/>
+                </geometry>
+            </collision>
+
+            <!-- Bounding-box approximation of the moving carriage and two forks. -->
+            <xacro:inertial_box mass="${moving_fork_mass}"
+                                x="${fork_length}"
+                                y="${fork_pair_width}"
+                                z="${carriage_height}">
+                <origin xyz="${carriage_depth + fork_length / 2}
+                             0 ${carriage_height / 4}"
+                        rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+    </xacro:macro>
+
+</robot>

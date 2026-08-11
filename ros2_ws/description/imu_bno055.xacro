@@ -1,0 +1,126 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!--
+      Generic BNO055 breakout-board model. The PCB dimensions vary by vendor;
+      replace these estimates with measurements of the board used on the robot.
+    -->
+    <xacro:property name="imu_board_length" value="0.027"/>
+    <xacro:property name="imu_board_width" value="0.020"/>
+    <xacro:property name="imu_board_thickness" value="0.004"/>
+    <xacro:property name="imu_mount_length" value="0.035"/>
+    <xacro:property name="imu_mount_width" value="0.028"/>
+    <xacro:property name="imu_mount_thickness" value="0.002"/>
+    <xacro:property name="imu_standoff_height" value="0.004"/>
+    <xacro:property name="imu_standoff_radius" value="0.0015"/>
+    <xacro:property name="imu_mass" value="0.010"/>
+
+    <material name="imu_pcb_green">
+        <color rgba="0.02 0.38 0.12 1"/>
+    </material>
+
+    <material name="imu_chip_black">
+        <color rgba="0.03 0.03 0.035 1"/>
+    </material>
+
+    <material name="imu_mount_black">
+        <color rgba="0.10 0.10 0.11 1"/>
+    </material>
+
+    <material name="imu_pin_gold">
+        <color rgba="0.72 0.50 0.08 1"/>
+    </material>
+
+    <!--
+      imu_link is located at the centre of the PCB. With rpy=0, its axes are:
+      +X robot forward, +Y robot left and +Z upward (REP-103 convention).
+    -->
+    <xacro:macro name="bno055_imu" params="parent x:=0.0 y:=0.0 yaw:=0.0">
+        <joint name="imu_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="imu_link"/>
+            <origin xyz="${x} ${y}
+                         ${chassis_height / 2 + imu_mount_thickness
+                           + imu_standoff_height + imu_board_thickness / 2}"
+                    rpy="0 0 ${yaw}"/>
+        </joint>
+
+        <link name="imu_link">
+            <!-- BNO055 breakout PCB. -->
+            <visual name="imu_board_visual">
+                <geometry>
+                    <box size="${imu_board_length} ${imu_board_width}
+                               ${imu_board_thickness}"/>
+                </geometry>
+                <material name="imu_pcb_green"/>
+            </visual>
+
+            <!-- Sensor IC on the top side of the board. -->
+            <visual name="imu_chip_visual">
+                <origin xyz="0 0 ${imu_board_thickness / 2 + 0.00075}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="0.0052 0.0038 0.0015"/>
+                </geometry>
+                <material name="imu_chip_black"/>
+            </visual>
+
+            <!-- Header strip indicates the electrical-connector side. -->
+            <visual name="imu_header_visual">
+                <origin xyz="0 ${-(imu_board_width / 2 - 0.0015)}
+                             ${imu_board_thickness / 2 + 0.001}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="0.018 0.0025 0.002"/>
+                </geometry>
+                <material name="imu_pin_gold"/>
+            </visual>
+
+            <!-- Mounting plate below the sensor. -->
+            <visual name="imu_mount_visual">
+                <origin xyz="0 0
+                             ${-(imu_board_thickness / 2 + imu_standoff_height
+                                + imu_mount_thickness / 2)}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${imu_mount_length} ${imu_mount_width}
+                               ${imu_mount_thickness}"/>
+                </geometry>
+                <material name="imu_mount_black"/>
+            </visual>
+
+            <!-- Four simplified PCB standoffs. -->
+            <xacro:macro name="imu_standoff" params="name sx sy">
+                <visual name="${name}_visual">
+                    <origin xyz="${sx * 0.0105} ${sy * 0.007}
+                                 ${-(imu_board_thickness / 2 + imu_standoff_height / 2)}"
+                            rpy="0 0 0"/>
+                    <geometry>
+                        <cylinder radius="${imu_standoff_radius}"
+                                  length="${imu_standoff_height}"/>
+                    </geometry>
+                    <material name="imu_mount_black"/>
+                </visual>
+            </xacro:macro>
+            <xacro:imu_standoff name="imu_front_left_standoff" sx="1" sy="1"/>
+            <xacro:imu_standoff name="imu_front_right_standoff" sx="1" sy="-1"/>
+            <xacro:imu_standoff name="imu_rear_left_standoff" sx="-1" sy="1"/>
+            <xacro:imu_standoff name="imu_rear_right_standoff" sx="-1" sy="-1"/>
+
+            <collision name="imu_board_collision">
+                <geometry>
+                    <box size="${imu_board_length} ${imu_board_width}
+                               ${imu_board_thickness}"/>
+                </geometry>
+            </collision>
+
+            <xacro:inertial_box mass="${imu_mass}"
+                                x="${imu_board_length}"
+                                y="${imu_board_width}"
+                                z="${imu_board_thickness}">
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+    </xacro:macro>
+
+</robot>
