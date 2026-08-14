@@ -69,7 +69,8 @@ endif ()
 
 message(STATUS "ORRBEC : ${HOST_PLATFORM}")
 set(ORBBEC_OPENNI2_REDIST
-  "${CMAKE_CURRENT_SOURCE_DIR}/openni2_redist/${HOST_PLATFORM}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/openni2_redist/${HOST_PLATFORM}"
+  CACHE PATH "Path to the Orbbec OpenNI2 redistribution directory")
 
 set(dependencies
   ament_index_cpp
@@ -220,13 +221,19 @@ install(TARGETS ${PROJECT_NAME}
   )
 
 
-install(FILES openni2_redist/${HOST_PLATFORM}/libOpenNI2.so
-  DESTINATION lib/
-  )
+if (EXISTS "${ORBBEC_OPENNI2_REDIST}/libOpenNI2.so")
+  install(FILES "${ORBBEC_OPENNI2_REDIST}/libOpenNI2.so"
+    DESTINATION lib/
+    )
 
-install(DIRECTORY openni2_redist/${HOST_PLATFORM}/OpenNI2
-  DESTINATION lib/
-  )
+  install(DIRECTORY "${ORBBEC_OPENNI2_REDIST}/OpenNI2"
+    DESTINATION lib/
+    )
+else ()
+  message(WARNING
+    "Orbbec OpenNI2 redist not found at ${ORBBEC_OPENNI2_REDIST}; "
+    "using the system OpenNI2 library and drivers")
+endif ()
 
 install(TARGETS list_devices_node
   clean_shm_node

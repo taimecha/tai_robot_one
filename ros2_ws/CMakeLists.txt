@@ -40,6 +40,7 @@ install(
 install(
   PROGRAMS
     scripts/keyboard_teleop
+    scripts/imu_visualizer
     scripts/test_robot_motion
   DESTINATION lib/${PROJECT_NAME}
 )

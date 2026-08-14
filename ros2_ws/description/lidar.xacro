@@ -1,0 +1,111 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- SLAMTEC RPLIDAR A1M8 mounted above the fixed forklift mast.
+         Manufacturer envelope: 96.8 x 70.3 x 55 mm, mass: 170 g. -->
+    <xacro:property name="lidar_body_width" value="0.0968"/>
+    <xacro:property name="lidar_body_depth" value="0.0703"/>
+    <xacro:property name="lidar_body_height" value="0.055"/>
+    <xacro:property name="lidar_turret_radius" value="0.033"/>
+    <xacro:property name="lidar_mass" value="0.170"/>
+    <xacro:property name="lidar_scan_height_ground" value="0.800"/>
+
+    <material name="lidar_black">
+        <color rgba="0.035 0.040 0.045 1"/>
+    </material>
+
+    <material name="lidar_red">
+        <color rgba="0.75 0.04 0.04 1"/>
+    </material>
+
+    <xacro:macro name="fork_mast_lidar" params="parent">
+        <!-- mast_frame starts mast_bottom_ground metres above the floor. -->
+        <joint name="lidar_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="lidar_link"/>
+            <origin xyz="${guide_axis_x} 0
+                         ${lidar_scan_height_ground - mast_bottom_ground}"
+                    rpy="0 0 0"/>
+        </joint>
+
+        <!-- lidar_link is the optical scan plane, exactly z=0.80 m at rest. -->
+        <link name="lidar_link">
+            <visual name="a1m8_base_visual">
+                <origin xyz="0 0 -0.0425" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${lidar_body_width} ${lidar_body_depth} 0.025"/>
+                </geometry>
+                <material name="lidar_black"/>
+            </visual>
+            <visual name="a1m8_turret_visual">
+                <origin xyz="0 0 -0.015" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${lidar_turret_radius}" length="0.030"/>
+                </geometry>
+                <material name="lidar_red"/>
+            </visual>
+            <visual name="a1m8_top_cap_visual">
+                <origin xyz="0 0 -0.0025" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${lidar_turret_radius * 0.72}" length="0.005"/>
+                </geometry>
+                <material name="lidar_black"/>
+            </visual>
+            <visual name="lidar_bracket_visual">
+                <origin xyz="${-guide_axis_x / 2} 0 -0.045" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${guide_axis_x + 0.010} 0.055 0.010"/>
+                </geometry>
+                <material name="bearing_dark"/>
+            </visual>
+            <collision name="a1m8_body_collision">
+                <origin xyz="0 0 ${-lidar_body_height / 2}" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${lidar_body_width} ${lidar_body_depth} ${lidar_body_height}"/>
+                </geometry>
+            </collision>
+            <xacro:inertial_box mass="${lidar_mass}"
+                                x="${lidar_body_width}"
+                                y="${lidar_body_depth}"
+                                z="${lidar_body_height}">
+                <origin xyz="0 0 ${-lidar_body_height / 2}" rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+
+        <gazebo reference="lidar_link">
+            <sensor name="rplidar_a1m8" type="gpu_lidar">
+                <always_on>true</always_on>
+                <!-- A1M8 nominal rotation rate is 5.5 revolutions/second. -->
+                <update_rate>5.5</update_rate>
+                <!-- RViz still displays /scan; disable the duplicate Gazebo
+                     ray visualization to avoid an extra render workload. -->
+                <visualize>false</visualize>
+                <topic>/scan</topic>
+                <gz_frame_id>lidar_link</gz_frame_id>
+                <ray>
+                    <scan>
+                        <horizontal>
+                            <!-- 360 rays give one-degree angular spacing,
+                                 matching the published A1 angular-resolution limit. -->
+                            <samples>360</samples>
+                            <resolution>1</resolution>
+                            <min_angle>${-pi}</min_angle>
+                            <max_angle>${pi}</max_angle>
+                        </horizontal>
+                    </scan>
+                    <range>
+                        <min>0.15</min>
+                        <max>12.0</max>
+                        <resolution>0.01</resolution>
+                    </range>
+                    <noise>
+                        <type>gaussian</type>
+                        <mean>0</mean>
+                        <stddev>0.003</stddev>
+                    </noise>
+                </ray>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+</robot>

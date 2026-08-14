@@ -4,6 +4,7 @@
     <xacro:include filename="inertial_macros.xacro"/>
     <xacro:include filename="forklift.xacro"/>
     <xacro:include filename="imu_bno055.xacro"/>
+    <xacro:include filename="lidar.xacro"/>
     <xacro:include filename="gazebo_control.xacro"/>
     <xacro:include filename="battery_pack.xacro"/>
 
@@ -28,7 +29,25 @@
     <xacro:property name="tire_ground_mu_longitudinal" value="0.85"/>
     <xacro:property name="tire_ground_mu_lateral" value="0.45"/>
 
-    <!-- MGL42GM-895, 24 V / 100 RPM (100:1 gearbox), from the supplied drawing. -->
+    <!--
+      MGL42GM-895, 24 V, 71:1 gearbox (the purchased 140 RPM version).
+      Datasheet column 71: 140 RPM no-load, 126 RPM rated,
+      30 kgf.cm rated torque and 98 kgf.cm stall torque.
+
+      wheel_joint effort uses stall torque as the short-duration peak needed
+      to start a skid-steer turn. The rated torque remains the continuous
+      thermal limit; Gazebo does not model motor temperature or duty cycle.
+    -->
+    <xacro:property name="motor_gear_ratio" value="71.0"/>
+    <xacro:property name="motor_no_load_speed_rpm" value="140.0"/>
+    <xacro:property name="motor_rated_speed_rpm" value="126.0"/>
+    <xacro:property name="kgf_cm_to_nm" value="0.0980665"/>
+    <xacro:property name="motor_rated_torque"
+                    value="${30.0 * kgf_cm_to_nm}"/>
+    <xacro:property name="motor_stall_torque"
+                    value="${98.0 * kgf_cm_to_nm}"/>
+    <xacro:property name="motor_no_load_speed_rad_s"
+                    value="${motor_no_load_speed_rpm * 2.0 * pi / 60.0}"/>
     <xacro:property name="motor_body_length" value="0.072"/>
     <xacro:property name="motor_body_radius" value="0.025"/>
     <xacro:property name="gearbox_length" value="0.0535"/>
@@ -267,6 +286,9 @@
             <child link="${position}_wheel"/>
             <origin xyz="${x} ${y} 0" rpy="0 0 0"/>
             <axis xyz="0 1 0"/>
+            <!-- 9.611 N.m short-duration peak; continuous rating is 2.942 N.m. -->
+            <limit effort="${motor_stall_torque}"
+                   velocity="${motor_no_load_speed_rad_s}"/>
             <dynamics damping="0.1" friction="0.1"/>
         </joint>
 
@@ -400,6 +422,9 @@
 
     <!-- Front lift mast and the 0-520 mm prismatic fork mechanism. -->
     <xacro:forklift_assembly parent="base_link"/>
+
+    <!-- Fixed 360-degree lidar; its scan plane is 0.80 m above the ground. -->
+    <xacro:fork_mast_lidar parent="mast_frame"/>
 
     <!-- BNO055 mounted near the centre of the chassis top surface. -->
     <xacro:bno055_imu parent="chassis" x="0.0" y="0.0" yaw="0.0"/>

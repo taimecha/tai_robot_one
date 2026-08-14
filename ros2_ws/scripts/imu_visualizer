@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+
+"""Render live Gazebo IMU data as RGB axes and text in RViz."""
+
+import math
+
+from geometry_msgs.msg import Quaternion
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
+from visualization_msgs.msg import Marker, MarkerArray
+
+
+def yaw_degrees(orientation):
+    """Return REP-103 yaw in degrees, normalized to [-180, 180]."""
+    sin_yaw = 2.0 * (
+        orientation.w * orientation.z
+        + orientation.x * orientation.y)
+    cos_yaw = 1.0 - 2.0 * (
+        orientation.y * orientation.y
+        + orientation.z * orientation.z)
+    return math.degrees(math.atan2(sin_yaw, cos_yaw))
+
+
+class ImuVisualizer(Node):
+    """Show sensor attitude and numeric values without an RViz IMU plugin."""
+
+    def __init__(self):
+        super().__init__('imu_visualizer')
+        self.declare_parameter('publish_rate', 10.0)
+        publish_rate = float(self.get_parameter('publish_rate').value)
+        if publish_rate <= 0.0:
+            raise ValueError('publish_rate must be positive')
+        self.publish_interval_ns = int(1_000_000_000 / publish_rate)
+        self.last_publish_stamp_ns = None
+        self.marker_publisher = self.create_publisher(
+            MarkerArray, '/imu/markers', 10)
+        self.create_subscription(
+            Imu, '/imu', self.imu_callback, qos_profile_sensor_data)
+
+    @staticmethod
+    def valid_orientation(orientation):
+        norm = math.sqrt(
+            orientation.x * orientation.x
+            + orientation.y * orientation.y
+            + orientation.z * orientation.z
+            + orientation.w * orientation.w)
+        if norm < 1e-9:
+            identity = Quaternion()
+            identity.w = 1.0
+            return identity
+        normalized = Quaternion()
+        normalized.x = orientation.x / norm
+        normalized.y = orientation.y / norm
+        normalized.z = orientation.z / norm
+        normalized.w = orientation.w / norm
+        return normalized
+
+    @staticmethod
+    def axis_rotation(axis):
+        rotation = Quaternion()
+        if axis == 'x':
+            rotation.w = 1.0
+        elif axis == 'y':
+            rotation.z = math.sin(math.pi / 4.0)
+            rotation.w = math.cos(math.pi / 4.0)
+        else:
+            rotation.y = -math.sin(math.pi / 4.0)
+            rotation.w = math.cos(math.pi / 4.0)
+        return rotation
+
+    def base_marker(self, message, marker_id, marker_type):
+        marker = Marker()
+        # Attaching markers to the robot avoids a high-rate /odom subscription.
+        # A zero timestamp asks RViz for the newest available transform. Gazebo
+        # publishes IMU and TF on separate sensor cycles, so copying the exact
+        # IMU timestamp can intermittently put the marker a few milliseconds
+        # ahead of the TF buffer and make RViz flash Error / OK.
+        marker.header.frame_id = 'base_footprint'
+        marker.frame_locked = True
+        marker.ns = 'gazebo_imu'
+        marker.id = marker_id
+        marker.type = marker_type
+        marker.action = Marker.ADD
+        marker.pose.position.z = 0.55
+        return marker
+
+    def imu_callback(self, message):
+        stamp_ns = (
+            message.header.stamp.sec * 1_000_000_000
+            + message.header.stamp.nanosec)
+        if self.last_publish_stamp_ns is not None:
+            elapsed_ns = stamp_ns - self.last_publish_stamp_ns
+            if 0 <= elapsed_ns < self.publish_interval_ns:
+                return
+        self.last_publish_stamp_ns = stamp_ns
+
+        orientation = self.valid_orientation(message.orientation)
+        yaw = yaw_degrees(orientation)
+        markers = MarkerArray()
+        colors = {
+            'x': (1.0, 0.1, 0.1),
+            'y': (0.1, 1.0, 0.1),
+            'z': (0.1, 0.35, 1.0),
+        }
+
+        for marker_id, axis in enumerate(('x', 'y', 'z')):
+            marker = self.base_marker(message, marker_id, Marker.ARROW)
+            marker.pose.orientation = self.axis_rotation(axis)
+            marker.scale.x = 0.24
+            marker.scale.y = 0.025
+            marker.scale.z = 0.040
+            marker.color.r, marker.color.g, marker.color.b = colors[axis]
+            marker.color.a = 1.0
+            markers.markers.append(marker)
+
+        text = self.base_marker(message, 3, Marker.TEXT_VIEW_FACING)
+        text.pose.position.z += 0.28
+        text.pose.orientation.w = 1.0
+        text.scale.z = 0.075
+        text.color.r = 1.0
+        text.color.g = 1.0
+        text.color.b = 1.0
+        text.color.a = 1.0
+        text.text = (
+            'IMU /imu (Gazebo)\n'
+            f'Yaw={yaw:+.1f}°  '
+            f'wz={message.angular_velocity.z:+.3f} rad/s  '
+            f'a=({message.linear_acceleration.x:+.2f}, '
+            f'{message.linear_acceleration.y:+.2f}, '
+            f'{message.linear_acceleration.z:+.2f}) m/s²')
+        markers.markers.append(text)
+        self.marker_publisher.publish(markers)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = ImuVisualizer()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

@@ -38,14 +38,18 @@
             <topic>/lift_position</topic>
             <initial_position>0.0</initial_position>
             <p_gain>1200.0</p_gain>
-            <i_gain>20.0</i_gain>
+            <!-- Feed-forward already balances gravity; integral action caused
+                 about 14 mm of wind-up after a long upward move. -->
+            <i_gain>0.0</i_gain>
             <d_gain>80.0</d_gain>
             <i_min>-100.0</i_min>
             <i_max>100.0</i_max>
-            <cmd_min>-1000.0</cmd_min>
-            <cmd_max>1000.0</cmd_max>
+            <!-- Prismatic joint commands are force [N], limited by the
+                 estimated stepper + T8x8 drivetrain capability. -->
+            <cmd_min>${-lift_max_force}</cmd_min>
+            <cmd_max>${lift_max_force}</cmd_max>
             <!-- Feed-forward balances the estimated 4 kg moving assembly. -->
-            <cmd_offset>39.24</cmd_offset>
+            <cmd_offset>${moving_fork_mass * 9.81}</cmd_offset>
         </plugin>
 
         <!-- Gazebo joint feedback is bridged to ROS /joint_states. -->

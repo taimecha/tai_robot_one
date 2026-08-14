@@ -2,8 +2,15 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    RegisterEventHandler,
+    SetEnvironmentVariable,
+    TimerAction,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -20,6 +27,10 @@ def generate_launch_description():
     gz_args = LaunchConfiguration('gz_args')
     world_file = os.path.join(
         package_share, 'worlds', 'warehouse_empty.sdf')
+    model_path = os.path.join(package_share, 'worlds', 'models')
+    existing_resource_path = os.environ.get('GZ_SIM_RESOURCE_PATH', '')
+    gazebo_resource_path = os.pathsep.join(
+        path for path in (model_path, existing_resource_path) if path)
     xacro_file = os.path.join(
         package_share, 'description', 'robot.urdf.xacro')
     rviz_config = os.path.join(
@@ -52,6 +63,8 @@ def generate_launch_description():
             '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
             '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
             '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
+            '/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
+            '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
             # ROS -> Gazebo
             '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
             '/lift_position@std_msgs/msg/Float64]gz.msgs.Double',
@@ -65,6 +78,15 @@ def generate_launch_description():
         name='robot_state_publisher',
         output='screen',
         parameters=[robot_parameters],
+    )
+
+    imu_visualizer = Node(
+        package='tai_robot_one',
+        executable='imu_visualizer',
+        name='imu_visualizer',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(use_rviz),
     )
 
     spawn_robot = Node(
@@ -93,7 +115,33 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
+    # Starting these consumers only after `create` exits prevents the initial
+    # missing odom -> base_footprint transform from appearing as an IMU error.
+    delayed_visualization = RegisterEventHandler(
+        OnProcessExit(
+            target_action=spawn_robot,
+            on_exit=[TimerAction(
+                period=1.0,
+                actions=[imu_visualizer, rviz],
+            )],
+        )
+    )
+
     return LaunchDescription([
+        # WSLg exposes Windows GPUs through Mesa's D3D12 Gallium driver.
+        # Select the discrete RTX adapter instead of software rendering / iGPU.
+        SetEnvironmentVariable(
+            name='MESA_D3D12_DEFAULT_ADAPTER_NAME',
+            value='NVIDIA'),
+        SetEnvironmentVariable(
+            name='GALLIUM_DRIVER',
+            value='d3d12'),
+        SetEnvironmentVariable(
+            name='LIBGL_ALWAYS_SOFTWARE',
+            value='0'),
+        SetEnvironmentVariable(
+            name='GZ_SIM_RESOURCE_PATH',
+            value=gazebo_resource_path),
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='true',
@@ -110,5 +158,5 @@ def generate_launch_description():
         gazebo_bridge,
         robot_state_publisher,
         delayed_spawn,
-        rviz,
+        delayed_visualization,
     ])
