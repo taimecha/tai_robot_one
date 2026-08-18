@@ -8,7 +8,8 @@
     <xacro:property name="lidar_body_height" value="0.055"/>
     <xacro:property name="lidar_turret_radius" value="0.033"/>
     <xacro:property name="lidar_mass" value="0.170"/>
-    <xacro:property name="lidar_scan_height_ground" value="0.800"/>
+    <!-- Measured on the real robot: ground to the centre of the laser eye. -->
+    <xacro:property name="lidar_scan_height_ground" value="0.835"/>
 
     <material name="lidar_black">
         <color rgba="0.035 0.040 0.045 1"/>
@@ -18,48 +19,42 @@
         <color rgba="0.75 0.04 0.04 1"/>
     </material>
 
-    <xacro:macro name="fork_mast_lidar" params="parent">
-        <!-- mast_frame starts mast_bottom_ground metres above the floor. -->
+    <xacro:macro name="fork_mast_lidar"
+                 params="parent x:=0.0 y:=0.0 z:=0.0">
         <joint name="lidar_joint" type="fixed">
             <parent link="${parent}"/>
             <child link="lidar_link"/>
-            <origin xyz="${guide_axis_x} 0
-                         ${lidar_scan_height_ground - mast_bottom_ground}"
-                    rpy="0 0 0"/>
+            <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
         </joint>
 
-        <!-- lidar_link is the optical scan plane, exactly z=0.80 m at rest. -->
+        <!-- lidar_link is the optical scan plane, exactly z=0.835 m. -->
         <link name="lidar_link">
             <visual name="a1m8_base_visual">
-                <origin xyz="0 0 -0.0425" rpy="0 0 0"/>
+                <!-- Bottom of the lidar sits on the common sensor plate. -->
+                <origin xyz="0 0 -0.0375" rpy="0 0 0"/>
                 <geometry>
                     <box size="${lidar_body_width} ${lidar_body_depth} 0.025"/>
                 </geometry>
                 <material name="lidar_black"/>
             </visual>
             <visual name="a1m8_turret_visual">
-                <origin xyz="0 0 -0.015" rpy="0 0 0"/>
+                <origin xyz="0 0 -0.0125" rpy="0 0 0"/>
                 <geometry>
-                    <cylinder radius="${lidar_turret_radius}" length="0.030"/>
+                    <cylinder radius="${lidar_turret_radius}" length="0.035"/>
                 </geometry>
                 <material name="lidar_red"/>
             </visual>
             <visual name="a1m8_top_cap_visual">
-                <origin xyz="0 0 -0.0025" rpy="0 0 0"/>
+                <origin xyz="0 0 0.0025" rpy="0 0 0"/>
                 <geometry>
                     <cylinder radius="${lidar_turret_radius * 0.72}" length="0.005"/>
                 </geometry>
                 <material name="lidar_black"/>
             </visual>
-            <visual name="lidar_bracket_visual">
-                <origin xyz="${-guide_axis_x / 2} 0 -0.045" rpy="0 0 0"/>
-                <geometry>
-                    <box size="${guide_axis_x + 0.010} 0.055 0.010"/>
-                </geometry>
-                <material name="bearing_dark"/>
-            </visual>
             <collision name="a1m8_body_collision">
-                <origin xyz="0 0 ${-lidar_body_height / 2}" rpy="0 0 0"/>
+                <!-- The scan plane is 5 mm below the top of the housing. -->
+                <origin xyz="0 0 ${-lidar_body_height / 2 + 0.005}"
+                        rpy="0 0 0"/>
                 <geometry>
                     <box size="${lidar_body_width} ${lidar_body_depth} ${lidar_body_height}"/>
                 </geometry>
@@ -68,7 +63,8 @@
                                 x="${lidar_body_width}"
                                 y="${lidar_body_depth}"
                                 z="${lidar_body_height}">
-                <origin xyz="0 0 ${-lidar_body_height / 2}" rpy="0 0 0"/>
+                <origin xyz="0 0 ${-lidar_body_height / 2 + 0.005}"
+                        rpy="0 0 0"/>
             </xacro:inertial_box>
         </link>
 

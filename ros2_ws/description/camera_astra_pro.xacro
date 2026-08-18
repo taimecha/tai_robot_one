@@ -1,0 +1,149 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- Measured / supplied Astra Pro specifications (W x H x D). -->
+    <xacro:property name="astra_width" value="0.165"/>
+    <xacro:property name="astra_height" value="0.030"/>
+    <xacro:property name="astra_depth" value="0.040"/>
+    <xacro:property name="astra_mass" value="0.310"/>
+    <xacro:property name="astra_horizontal_fov" value="${60.0 * pi / 180.0}"/>
+    <xacro:property name="astra_vertical_fov" value="${49.5 * pi / 180.0}"/>
+    <xacro:property name="astra_diagonal_fov" value="${73.0 * pi / 180.0}"/>
+    <xacro:property name="astra_image_width" value="640"/>
+    <xacro:property name="astra_image_height" value="480"/>
+    <xacro:property name="astra_fx"
+                    value="${(astra_image_width / 2.0)
+                             / tan(astra_horizontal_fov / 2.0)}"/>
+    <xacro:property name="astra_fy"
+                    value="${(astra_image_height / 2.0)
+                             / tan(astra_vertical_fov / 2.0)}"/>
+    <xacro:property name="astra_min_depth" value="0.6"/>
+    <xacro:property name="astra_max_depth" value="8.0"/>
+    <!-- Measured on the real robot: ground to the centre of the camera eye. -->
+    <xacro:property name="camera_eye_height_ground" value="0.800"/>
+
+    <material name="astra_black">
+        <color rgba="0.025 0.028 0.032 1"/>
+    </material>
+    <material name="astra_front">
+        <color rgba="0.08 0.09 0.10 1"/>
+    </material>
+    <material name="astra_lens">
+        <color rgba="0.04 0.10 0.17 1"/>
+    </material>
+
+    <xacro:macro name="astra_pro_camera"
+                 params="parent x:=0.0 y:=0.0 z:=0.0">
+        <!-- camera_link is located at the centre of the forward-facing eye.
+             REP-103 axes are X forward, Y left and Z up. -->
+        <joint name="camera_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="camera_link"/>
+            <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+        </joint>
+
+        <link name="camera_link">
+            <!-- The optical face is at x=0; the housing extends rearward. -->
+            <visual name="astra_housing_visual">
+                <origin xyz="${-astra_depth / 2} 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${astra_depth} ${astra_width} ${astra_height}"/>
+                </geometry>
+                <material name="astra_black"/>
+            </visual>
+            <visual name="astra_front_panel_visual">
+                <origin xyz="0.0005 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="0.001 ${astra_width * 0.96} ${astra_height * 0.84}"/>
+                </geometry>
+                <material name="astra_front"/>
+            </visual>
+
+            <!-- Three front elements make the RGB-D camera recognizable. -->
+            <visual name="astra_rgb_lens_visual">
+                <origin xyz="0.002 0 0" rpy="0 ${pi / 2} 0"/>
+                <geometry><cylinder radius="0.008" length="0.004"/></geometry>
+                <material name="astra_lens"/>
+            </visual>
+            <visual name="astra_ir_lens_visual">
+                <origin xyz="0.002 0.052 0" rpy="0 ${pi / 2} 0"/>
+                <geometry><cylinder radius="0.006" length="0.004"/></geometry>
+                <material name="astra_lens"/>
+            </visual>
+            <visual name="astra_projector_visual">
+                <origin xyz="0.002 -0.052 0" rpy="0 ${pi / 2} 0"/>
+                <geometry><cylinder radius="0.006" length="0.004"/></geometry>
+                <material name="astra_lens"/>
+            </visual>
+
+            <collision name="astra_housing_collision">
+                <origin xyz="${-astra_depth / 2} 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${astra_depth} ${astra_width} ${astra_height}"/>
+                </geometry>
+            </collision>
+            <xacro:inertial_box mass="${astra_mass}"
+                                x="${astra_depth}"
+                                y="${astra_width}"
+                                z="${astra_height}">
+                <origin xyz="${-astra_depth / 2} 0 0" rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+
+        <!-- REP-103 camera optical convention:
+             camera_link:         X forward, Y left,  Z up
+             camera_link_optical: Z forward, X right, Y down
+             Both frames share the physical centre of the camera eye. -->
+        <joint name="camera_optical_joint" type="fixed">
+            <parent link="camera_link"/>
+            <child link="camera_link_optical"/>
+            <origin xyz="0 0 0" rpy="${-pi / 2} 0 ${-pi / 2}"/>
+        </joint>
+
+        <link name="camera_link_optical"/>
+
+        <!-- Gazebo Harmonic RGB-D approximation of the Astra Pro. -->
+        <gazebo reference="camera_link">
+            <sensor name="astra_pro_rgbd" type="rgbd_camera">
+                <always_on>true</always_on>
+                <update_rate>30</update_rate>
+                <visualize>false</visualize>
+                <topic>/camera</topic>
+                <gz_frame_id>camera_link_optical</gz_frame_id>
+                <camera>
+                    <optical_frame_id>camera_link_optical</optical_frame_id>
+                    <!-- Separate fx/fy values below reproduce 60 deg horizontal
+                         and 49.5 deg vertical FOV at 640 x 480. -->
+                    <horizontal_fov>${astra_horizontal_fov}</horizontal_fov>
+                    <image>
+                        <width>${astra_image_width}</width>
+                        <height>${astra_image_height}</height>
+                    </image>
+                    <clip>
+                        <near>${astra_min_depth}</near>
+                        <far>${astra_max_depth}</far>
+                    </clip>
+                    <lens>
+                        <intrinsics>
+                            <fx>${astra_fx}</fx>
+                            <fy>${astra_fy}</fy>
+                            <cx>${astra_image_width / 2.0}</cx>
+                            <cy>${astra_image_height / 2.0}</cy>
+                            <s>0.0</s>
+                        </intrinsics>
+                        <projection>
+                            <p_fx>${astra_fx}</p_fx>
+                            <p_fy>${astra_fy}</p_fy>
+                            <p_cx>${astra_image_width / 2.0}</p_cx>
+                            <p_cy>${astra_image_height / 2.0}</p_cy>
+                            <tx>0.0</tx>
+                            <ty>0.0</ty>
+                        </projection>
+                    </lens>
+                </camera>
+                <enable_metrics>true</enable_metrics>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+</robot>

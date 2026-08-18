@@ -1,0 +1,122 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- Shared 3D-printed top bracket seen on the real forklift mast. -->
+    <!-- Trim the plate to the sensor envelope instead of leaving long tabs. -->
+    <xacro:property name="sensor_plate_side_margin" value="0.010"/>
+    <xacro:property name="sensor_plate_width"
+                    value="${astra_width + 2.0 * sensor_plate_side_margin}"/>
+    <xacro:property name="sensor_plate_thickness" value="0.008"/>
+    <!-- The riser is exactly 30 x 30 mm and shares the extrusion centreline. -->
+    <xacro:property name="sensor_riser_width" value="${mast_profile}"/>
+    <xacro:property name="sensor_mount_mass" value="0.200"/>
+
+    <!-- Both devices stand on the plate. The camera is farther forward (+X)
+         and its eye is 35 mm lower than the lidar scan plane. -->
+    <xacro:property name="camera_front_overhang" value="0.010"/>
+    <!-- sensor_mount_link is on the aluminium-extrusion centreline. This puts
+         the camera face exactly 10 mm ahead of the T8 support front face. -->
+    <xacro:property name="camera_x_on_mount"
+                    value="${guide_axis_x + shaft_support_depth / 2.0
+                             + camera_front_overhang}"/>
+    <!-- Put the lidar behind the camera with a 4 mm physical gap between
+         their housings, while keeping both devices on the same plate. -->
+    <xacro:property name="sensor_housing_gap" value="0.004"/>
+    <xacro:property name="lidar_x_on_mount"
+                    value="${camera_x_on_mount - astra_depth
+                             - sensor_housing_gap - lidar_body_width / 2.0}"/>
+    <xacro:property name="sensor_plate_end_margin" value="0.010"/>
+    <xacro:property name="sensor_plate_rear_x"
+                    value="${lidar_x_on_mount - lidar_body_width / 2.0
+                             - sensor_plate_end_margin}"/>
+    <xacro:property name="sensor_plate_front_x"
+                    value="${camera_x_on_mount + sensor_plate_end_margin}"/>
+    <xacro:property name="sensor_plate_length"
+                    value="${sensor_plate_front_x - sensor_plate_rear_x}"/>
+    <xacro:property name="sensor_plate_center_x"
+                    value="${(sensor_plate_front_x + sensor_plate_rear_x) / 2.0}"/>
+    <xacro:property name="sensor_plate_top_ground"
+                    value="${camera_eye_height_ground - astra_height / 2.0}"/>
+    <xacro:property name="sensor_plate_center_z"
+                    value="${sensor_plate_top_ground - lidar_scan_height_ground
+                             - sensor_plate_thickness / 2.0}"/>
+    <xacro:property name="sensor_riser_height"
+                    value="${sensor_plate_top_ground - sensor_plate_thickness
+                             - mast_bottom_ground - mast_height}"/>
+    <xacro:property name="sensor_riser_center_z"
+                    value="${mast_bottom_ground + mast_height
+                             + sensor_riser_height / 2.0
+                             - lidar_scan_height_ground}"/>
+
+    <material name="sensor_bracket_red">
+        <color rgba="0.85 0.035 0.02 1"/>
+    </material>
+
+    <xacro:macro name="mast_sensor_mount" params="parent">
+        <!-- The mount frame lies on the laser scan plane. Because the mast is
+             fixed, lifting the fork carriage does not move either sensor. -->
+        <joint name="sensor_mount_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="sensor_mount_link"/>
+            <origin xyz="0 0
+                         ${lidar_scan_height_ground - mast_bottom_ground}"
+                    rpy="0 0 0"/>
+        </joint>
+
+        <link name="sensor_mount_link">
+            <visual name="sensor_top_plate_visual">
+                <origin xyz="${sensor_plate_center_x} 0
+                             ${sensor_plate_center_z}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${sensor_plate_length} ${sensor_plate_width}
+                               ${sensor_plate_thickness}"/>
+                </geometry>
+                <material name="sensor_bracket_red"/>
+            </visual>
+            <visual name="sensor_riser_visual">
+                <origin xyz="0 0 ${sensor_riser_center_z}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${mast_profile} ${sensor_riser_width}
+                               ${sensor_riser_height}"/>
+                </geometry>
+                <material name="sensor_bracket_red"/>
+            </visual>
+
+            <collision name="sensor_top_plate_collision">
+                <origin xyz="${sensor_plate_center_x} 0
+                             ${sensor_plate_center_z}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${sensor_plate_length} ${sensor_plate_width}
+                               ${sensor_plate_thickness}"/>
+                </geometry>
+            </collision>
+            <collision name="sensor_riser_collision">
+                <origin xyz="0 0 ${sensor_riser_center_z}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${mast_profile} ${sensor_riser_width}
+                               ${sensor_riser_height}"/>
+                </geometry>
+            </collision>
+            <xacro:inertial_box mass="${sensor_mount_mass}"
+                                x="${sensor_plate_length}"
+                                y="${sensor_plate_width}"
+                                z="${sensor_plate_thickness}">
+                <origin xyz="${sensor_plate_center_x} 0
+                             ${sensor_plate_center_z}"
+                        rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+
+        <xacro:fork_mast_lidar parent="sensor_mount_link"
+                               x="${lidar_x_on_mount}" y="0" z="0"/>
+        <xacro:astra_pro_camera parent="sensor_mount_link"
+                                x="${camera_x_on_mount}" y="0"
+                                z="${camera_eye_height_ground
+                                     - lidar_scan_height_ground}"/>
+    </xacro:macro>
+
+</robot>

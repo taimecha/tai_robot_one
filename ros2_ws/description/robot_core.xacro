@@ -5,6 +5,8 @@
     <xacro:include filename="forklift.xacro"/>
     <xacro:include filename="imu_bno055.xacro"/>
     <xacro:include filename="lidar.xacro"/>
+    <xacro:include filename="camera_astra_pro.xacro"/>
+    <xacro:include filename="sensor_mount.xacro"/>
     <xacro:include filename="gazebo_control.xacro"/>
     <xacro:include filename="battery_pack.xacro"/>
 
@@ -423,8 +425,8 @@
     <!-- Front lift mast and the 0-520 mm prismatic fork mechanism. -->
     <xacro:forklift_assembly parent="base_link"/>
 
-    <!-- Fixed 360-degree lidar; its scan plane is 0.80 m above the ground. -->
-    <xacro:fork_mast_lidar parent="mast_frame"/>
+    <!-- Common top bracket: lidar eye at 0.835 m and Astra Pro eye at 0.800 m. -->
+    <xacro:mast_sensor_mount parent="mast_frame"/>
 
     <!-- BNO055 mounted near the centre of the chassis top surface. -->
     <xacro:bno055_imu parent="chassis" x="0.0" y="0.0" yaw="0.0"/>

@@ -52,7 +52,7 @@ Visualization Manager:
       Color Transformer: FlatColor
       Decay Time: 0.2
       Enabled: true
-      Name: Lidar Scan - 0.80 m
+      Name: Lidar Scan - 0.835 m
       Position Transformer: XYZ
       Queue Size: 10
       Selectable: true
@@ -66,6 +66,17 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /scan
       Use Fixed Frame: true
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Astra Pro RGB - 0.800 m
+      Normalize Range: true
+      Queue Size: 2
+      Topic: /camera/image
+      Unreliable: false
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
