@@ -35,6 +35,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <chrono>
 #include "sl_lidar.h"
 #include "math.h"
 
@@ -353,16 +354,20 @@ public:
         }
 
         rclcpp::Time start_scan_time;
-        rclcpp::Time end_scan_time;
+        std::chrono::steady_clock::time_point steady_start_scan_time;
+        std::chrono::steady_clock::time_point steady_end_scan_time;
         double scan_duration;
         while (rclcpp::ok() && !need_exit) {
             sl_lidar_response_measurement_node_hq_t nodes[8192];
             size_t   count = _countof(nodes);
 
-            start_scan_time = this->now();
+            steady_start_scan_time = std::chrono::steady_clock::now();
             op_result = drv->grabScanDataHq(nodes, count);
-            end_scan_time = this->now();
-            scan_duration = (end_scan_time - start_scan_time).seconds();
+            steady_end_scan_time = std::chrono::steady_clock::now();
+            scan_duration = std::chrono::duration<double>(
+                steady_end_scan_time - steady_start_scan_time).count();
+            start_scan_time = this->now() -
+                rclcpp::Duration::from_seconds(scan_duration);
 
             if (op_result == SL_RESULT_OK) {
                 op_result = drv->ascendScanData(nodes, count);
@@ -480,4 +485,3 @@ int main(int argc, char * argv[])
   rclcpp::shutdown();
   return ret;
 }
-
