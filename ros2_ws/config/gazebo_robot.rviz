@@ -78,6 +78,45 @@ Visualization Manager:
       Topic: /camera/image
       Unreliable: false
       Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 4.5
+      Median window: 5
+      Min Value: 0.6
+      Name: Astra Pro Depth - display 0.6 to 4.5 m
+      Normalize Range: false
+      Queue Size: 2
+      Topic: /camera/depth_image
+      Unreliable: false
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 8
+        Min Value: 0.6
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0.25
+      Enabled: true
+      Name: Astra Pro RGB-D Point Cloud
+      Position Transformer: XYZ
+      Queue Size: 5
+      Selectable: true
+      Size (Pixels): 2
+      Size (m): 0.01
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /camera/points
+      Use Fixed Frame: true
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: IMU live axes and data
@@ -95,7 +134,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: odom
-    Frame Rate: 15
+    Frame Rate: 10
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact

@@ -1,0 +1,424 @@
+# TAI Robot One - ROS 2 Jazzy simulation-first Nav2 configuration.
+# Planar safety footprint includes the complete 455 mm fork projection.
+
+amcl:
+  ros__parameters:
+    use_sim_time: true
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    base_frame_id: base_footprint
+    global_frame_id: map
+    odom_frame_id: odom
+    scan_topic: scan
+    robot_model_type: nav2_amcl::DifferentialMotionModel
+    laser_model_type: likelihood_field
+    laser_likelihood_max_dist: 2.0
+    max_beams: 60
+    min_particles: 500
+    max_particles: 2000
+    pf_err: 0.05
+    pf_z: 0.99
+    resample_interval: 1
+    update_min_d: 0.10
+    update_min_a: 0.10
+    transform_tolerance: 0.5
+    tf_broadcast: true
+    # Simulation-only convenience: Gazebo and SLAM mapping both start the
+    # robot at map pose (0, 0, 0). Real hardware must use a measured/selected
+    # initial pose (or a separate production parameter file).
+    set_initial_pose: true
+    always_reset_initial_pose: false
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: base_footprint
+    # robot_localization fuses raw /base_controller/odom (and simulated IMU)
+    # into the same public /odom contract used by the real-hardware launch.
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    action_server_result_timeout: 900.0
+    navigators: [navigate_to_pose, navigate_through_poses]
+    navigate_to_pose:
+      plugin: nav2_bt_navigator::NavigateToPoseNavigator
+    navigate_through_poses:
+      plugin: nav2_bt_navigator::NavigateThroughPosesNavigator
+
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    # Jazzy's Nav2 command chain remains Twist; cmd_vel_stamper converts only
+    # the final, safety-filtered command for ros2_control's TwistStamped input.
+    enable_stamped_cmd_vel: false
+    controller_frequency: 20.0
+    costmap_update_timeout: 0.5
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins: [progress_checker]
+    goal_checker_plugins: [general_goal_checker]
+    controller_plugins: [FollowPath]
+
+    progress_checker:
+      plugin: nav2_controller::SimpleProgressChecker
+      required_movement_radius: 0.15
+      movement_time_allowance: 15.0
+    general_goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      stateful: true
+      xy_goal_tolerance: 0.10
+      yaw_goal_tolerance: 0.10
+    FollowPath:
+      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+      desired_linear_vel: 0.45
+      lookahead_dist: 0.60
+      min_lookahead_dist: 0.30
+      max_lookahead_dist: 0.90
+      lookahead_time: 1.5
+      rotate_to_heading_angular_vel: 0.60
+      transform_tolerance: 0.20
+      use_velocity_scaled_lookahead_dist: true
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.60
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: true
+      # Must not exceed the 0.35 m costmap inflation radius. Keep this factor
+      # identical to InflationLayer so RPP can convert costs back to distance.
+      cost_scaling_dist: 0.30
+      cost_scaling_gain: 0.80
+      inflation_cost_scaling_factor: 4.0
+      regulated_linear_scaling_min_radius: 0.90
+      regulated_linear_scaling_min_speed: 0.08
+      use_fixed_curvature_lookahead: false
+      allow_reversing: false
+      use_rotate_to_heading: true
+      max_angular_accel: 1.5
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 8.0
+      publish_frequency: 4.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      rolling_window: true
+      width: 5
+      height: 5
+      resolution: 0.05
+      # Chassis rear=-0.303 m, fork tip=+0.758 m, wheel outer y=+/-0.232 m.
+      # A 20 mm planning margin is included on every side.
+      footprint: "[[0.78, 0.25], [0.78, -0.25], [-0.33, -0.25], [-0.33, 0.25]]"
+      footprint_padding: 0.01
+      plugins: [obstacle_layer, inflation_layer]
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        # The 0.835 m lidar misses the 0.68 m rack. The level RGB-D camera can
+        # add rack posts and loaded-pallet surfaces without sending its full
+        # cloud to every consumer. It cannot guarantee an empty ~35 mm pallet
+        # in the near field; keep the 0.05 m floor filter and treat that blind
+        # zone as a physical-sensor/design limitation, not a tuning problem.
+        observation_sources: "scan camera_obstacle_scan"
+        scan:
+          topic: /scan
+          data_type: LaserScan
+          clearing: true
+          marking: true
+          obstacle_min_range: 0.15
+          obstacle_max_range: 6.0
+          raytrace_min_range: 0.15
+          raytrace_max_range: 8.0
+          max_obstacle_height: 2.0
+          inf_is_valid: true
+        camera_obstacle_scan:
+          topic: /camera/obstacle_scan
+          data_type: LaserScan
+          clearing: true
+          marking: true
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_min_range: 0.60
+          obstacle_max_range: 6.00
+          raytrace_min_range: 0.60
+          raytrace_max_range: 6.00
+          # Do not clear costmap cells through an invalid / occluded camera
+          # ray.  The independent lidar remains a clearing observation source.
+          inf_is_valid: false
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.35
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      resolution: 0.05
+      track_unknown_space: true
+      footprint: "[[0.78, 0.25], [0.78, -0.25], [-0.33, -0.25], [-0.33, 0.25]]"
+      footprint_padding: 0.01
+      plugins: [static_layer, obstacle_layer, inflation_layer]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        enabled: true
+        # Feed the reduced forward RGB-D scan here for rack posts and loaded
+        # pallets omitted by the high-lidar map. A level camera still has a
+        # near-field blind zone for an empty ~35 mm pallet.
+        observation_sources: "scan camera_obstacle_scan"
+        scan:
+          topic: /scan
+          data_type: LaserScan
+          clearing: true
+          marking: true
+          obstacle_min_range: 0.15
+          obstacle_max_range: 6.0
+          raytrace_min_range: 0.15
+          raytrace_max_range: 8.0
+          max_obstacle_height: 2.0
+          inf_is_valid: true
+        camera_obstacle_scan:
+          topic: /camera/obstacle_scan
+          data_type: LaserScan
+          clearing: true
+          marking: true
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_min_range: 0.60
+          obstacle_max_range: 6.00
+          raytrace_min_range: 0.60
+          raytrace_max_range: 6.00
+          # Do not clear the static map through an invalid / occluded camera
+          # ray.  The independent lidar remains a clearing observation source.
+          inf_is_valid: false
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.35
+      always_send_full_costmap: true
+
+map_server:
+  ros__parameters:
+    use_sim_time: true
+    yaml_filename: ""
+
+map_saver:
+  ros__parameters:
+    use_sim_time: true
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: true
+    expected_planner_frequency: 5.0
+    planner_plugins: [GridBased]
+    GridBased:
+      plugin: nav2_navfn_planner::NavfnPlanner
+      tolerance: 0.20
+      use_astar: true
+      allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: true
+    smoother_plugins: [simple_smoother]
+    simple_smoother:
+      plugin: nav2_smoother::SimpleSmoother
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    enable_stamped_cmd_vel: false
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: [spin, backup, drive_on_heading, assisted_teleop, wait]
+    spin:
+      plugin: nav2_behaviors::Spin
+    backup:
+      plugin: nav2_behaviors::BackUp
+      acceleration_limit: 0.4
+      deceleration_limit: -0.5
+      minimum_speed: 0.05
+    drive_on_heading:
+      plugin: nav2_behaviors::DriveOnHeading
+      acceleration_limit: 0.4
+      deceleration_limit: -0.5
+      minimum_speed: 0.05
+    wait:
+      plugin: nav2_behaviors::Wait
+    assisted_teleop:
+      plugin: nav2_behaviors::AssistedTeleop
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.2
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.8
+    min_rotational_vel: 0.2
+    rotational_acc_lim: 1.5
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: true
+    loop_rate: 10
+    stop_on_failure: true
+    action_server_result_timeout: 900.0
+    waypoint_task_executor_plugin: wait_at_waypoint
+    wait_at_waypoint:
+      plugin: nav2_waypoint_follower::WaitAtWaypoint
+      enabled: true
+      waypoint_pause_duration: 500
+
+route_server:
+  ros__parameters:
+    use_sim_time: true
+    boundary_radius_to_achieve_node: 0.50
+    radius_to_achieve_node: 1.0
+    smooth_corners: true
+    operations: [AdjustSpeedLimit, ReroutingService, CollisionMonitor]
+    ReroutingService:
+      plugin: nav2_route::ReroutingService
+    AdjustSpeedLimit:
+      plugin: nav2_route::AdjustSpeedLimit
+    CollisionMonitor:
+      plugin: nav2_route::CollisionMonitor
+      max_collision_dist: 2.0
+    edge_cost_functions: [DistanceScorer, CostmapScorer]
+    DistanceScorer:
+      plugin: nav2_route::DistanceScorer
+    CostmapScorer:
+      plugin: nav2_route::CostmapScorer
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    enable_stamped_cmd_vel: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: OPEN_LOOP
+    max_velocity: [0.5, 0.0, 0.8]
+    min_velocity: [-0.35, 0.0, -0.8]
+    max_accel: [0.5, 0.0, 1.5]
+    max_decel: [-0.7, 0.0, -1.5]
+    odom_topic: /odom
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 0.5
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: true
+    enable_stamped_cmd_vel: false
+    enabled: true
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    cmd_vel_in_topic: cmd_vel_smoothed
+    cmd_vel_out_topic: cmd_vel
+    state_topic: collision_monitor_state
+    transform_tolerance: 0.2
+    # Jazzy exposes one timeout shared by every observation source (there is
+    # no per-source timeout API yet). At 0.45 s this tolerates one complete
+    # missed 5.5 Hz lidar period plus modest scheduling jitter, while still
+    # failing safe promptly for the 10 Hz camera.
+    source_timeout: 0.45
+    base_shift_correction: true
+    stop_pub_timeout: 1.0
+    polygons: [FootprintApproach]
+    FootprintApproach:
+      type: polygon
+      action_type: approach
+      footprint_topic: /local_costmap/published_footprint
+      time_before_collision: 1.5
+      simulation_time_step: 0.05
+      # Reduced from four to two so a 30 mm rack post at ~1 m is retained when
+      # it spans two adjacent one-degree rays. Raise only after verified noise
+      # false-stops; use one only after a separate sensor-noise safety review.
+      min_points: 2
+      visualize: true
+      enabled: true
+    # Collision Monitor bypasses the costmaps. The reduced camera scan adds
+    # rack posts and loaded pallets below the physical lidar plane; it is not
+    # a safety guarantee for an empty ~35 mm pallet in the camera's near field.
+    observation_sources: [scan, camera_obstacle_scan]
+    scan:
+      type: scan
+      topic: /scan
+      enabled: true
+    camera_obstacle_scan:
+      type: scan
+      topic: /camera/obstacle_scan
+      enabled: true
+
+docking_server:
+  ros__parameters:
+    use_sim_time: true
+    enable_stamped_cmd_vel: false
+    controller_frequency: 30.0
+    initial_perception_timeout: 5.0
+    wait_charge_timeout: 5.0
+    dock_approach_timeout: 30.0
+    undock_linear_tolerance: 0.05
+    undock_angular_tolerance: 0.10
+    max_retries: 3
+    base_frame: base_footprint
+    fixed_frame: odom
+    dock_backwards: false
+    dock_prestaging_tolerance: 0.5
+    dock_plugins: [simple_charging_dock]
+    simple_charging_dock:
+      plugin: opennav_docking::SimpleChargingDock
+      docking_threshold: 0.05
+      staging_x_offset: -0.70
+      use_external_detection_pose: true
+      use_battery_status: false
+      use_stall_detection: false
+      external_detection_timeout: 1.0
+      external_detection_translation_x: -0.18
+      external_detection_translation_y: 0.0
+      external_detection_rotation_roll: -1.57
+      external_detection_rotation_pitch: -1.57
+      external_detection_rotation_yaw: 0.0
+      filter_coef: 0.1
+    controller:
+      k_phi: 3.0
+      k_delta: 2.0
+      v_linear_min: 0.05
+      v_linear_max: 0.15
+      use_collision_detection: true
+      costmap_topic: local_costmap/costmap_raw
+      footprint_topic: local_costmap/published_footprint
+      transform_tolerance: 0.2
+      projection_time: 5.0
+      simulation_step: 0.1
+      dock_collision_threshold: 0.3

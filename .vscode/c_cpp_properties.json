@@ -1,0 +1,12 @@
+{
+  "configurations": [
+    {
+      "name": "ROS 2 Jazzy",
+      "compileCommands": "${workspaceFolder}/../../build/tai_robot_one_community/tai_robot_one/compile_commands.json",
+      "compilerPath": "/usr/bin/c++",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "linux-gcc-x64"
+    }
+  ],
+  "version": 4
+}

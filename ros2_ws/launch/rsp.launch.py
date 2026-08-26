@@ -3,9 +3,9 @@ import os
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
-from launch.actions import DeclareLaunchArgument
 from launch_ros.actions import Node
 
 import xacro
@@ -14,14 +14,18 @@ import xacro
 def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time')
-    use_joint_state_publisher = LaunchConfiguration('use_joint_state_publisher')
+    use_joint_state_publisher = LaunchConfiguration(
+        'use_joint_state_publisher')
 
     # Process the URDF file
     pkg_path = get_package_share_directory('tai_robot_one')
     xacro_file = os.path.join(pkg_path, 'description', 'robot.urdf.xacro')
     robot_description_config = xacro.process_file(xacro_file).toxml()
 
-    params = {'robot_description': robot_description_config, 'use_sim_time': use_sim_time}
+    params = {
+        'robot_description': robot_description_config,
+        'use_sim_time': use_sim_time,
+    }
 
     # Publish zero positions for movable joints while viewing the model in RViz.
     # Disable this node when the real motor driver publishes /joint_states.
@@ -40,7 +44,6 @@ def generate_launch_description():
         parameters=[params]
     )
 
-
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time',
@@ -49,7 +52,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_joint_state_publisher',
             default_value='true',
-            description='Publish zero wheel positions for RViz when no hardware driver is active'),
+            description=(
+                'Publish zero wheel positions for RViz when no hardware '
+                'driver is active')),
 
         node_joint_state_publisher,
         node_robot_state_publisher

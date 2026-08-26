@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!--
+      Common ros2_control contract for both simulation and the future Raspberry
+      Pi hardware backend.  Only the plugin name changes between backends; the
+      controller-facing joint names and interfaces stay identical.
+    -->
+    <xacro:macro name="tai_robot_ros2_control" params="hardware_plugin">
+        <ros2_control name="TaiRobotSystem" type="system">
+            <hardware>
+                <plugin>${hardware_plugin}</plugin>
+                <xacro:unless value="$(arg use_sim)">
+                    <param name="drive_serial_port">$(arg drive_serial_port)</param>
+                    <param name="drive_baud">460800</param>
+                    <param name="lift_serial_port">$(arg lift_serial_port)</param>
+                    <param name="lift_baud">115200</param>
+                    <param name="startup_timeout_ms">$(arg serial_startup_timeout_ms)</param>
+                    <param name="telemetry_timeout_ms">$(arg serial_telemetry_timeout_ms)</param>
+                    <param name="lift_home_timeout_ms">$(arg lift_home_timeout_ms)</param>
+                    <param name="home_lift_on_activate">$(arg home_lift_on_activate)</param>
+                    <param name="max_wheel_speed_rad_s">${max_wheel_speed_rad_s}</param>
+                    <param name="max_lift_position_m">${lift_travel}</param>
+                </xacro:unless>
+            </hardware>
+
+            <!-- Four independent motor/encoder channels.  The controller
+                 groups front/rear wheels by side for skid-steer kinematics. -->
+            <joint name="front_left_wheel_joint">
+                <command_interface name="velocity">
+                    <param name="min">${-max_wheel_speed_rad_s}</param>
+                    <param name="max">${max_wheel_speed_rad_s}</param>
+                </command_interface>
+                <state_interface name="position">
+                    <param name="initial_value">0.0</param>
+                </state_interface>
+                <state_interface name="velocity"/>
+            </joint>
+
+            <joint name="front_right_wheel_joint">
+                <command_interface name="velocity">
+                    <param name="min">${-max_wheel_speed_rad_s}</param>
+                    <param name="max">${max_wheel_speed_rad_s}</param>
+                </command_interface>
+                <state_interface name="position">
+                    <param name="initial_value">0.0</param>
+                </state_interface>
+                <state_interface name="velocity"/>
+            </joint>
+
+            <joint name="rear_left_wheel_joint">
+                <command_interface name="velocity">
+                    <param name="min">${-max_wheel_speed_rad_s}</param>
+                    <param name="max">${max_wheel_speed_rad_s}</param>
+                </command_interface>
+                <state_interface name="position">
+                    <param name="initial_value">0.0</param>
+                </state_interface>
+                <state_interface name="velocity"/>
+            </joint>
+
+            <joint name="rear_right_wheel_joint">
+                <command_interface name="velocity">
+                    <param name="min">${-max_wheel_speed_rad_s}</param>
+                    <param name="max">${max_wheel_speed_rad_s}</param>
+                </command_interface>
+                <state_interface name="position">
+                    <param name="initial_value">0.0</param>
+                </state_interface>
+                <state_interface name="velocity"/>
+            </joint>
+
+            <!-- Position is metres above the mechanical lower stop. -->
+            <joint name="lift_joint">
+                <xacro:if value="$(arg use_sim)">
+                    <command_interface name="effort">
+                        <param name="min">${-lift_max_force}</param>
+                        <param name="max">${lift_max_force}</param>
+                    </command_interface>
+                </xacro:if>
+                <xacro:unless value="$(arg use_sim)">
+                    <command_interface name="position">
+                        <param name="min">0.0</param>
+                        <param name="max">${lift_travel}</param>
+                    </command_interface>
+                </xacro:unless>
+                <state_interface name="position">
+                    <param name="initial_value">0.0</param>
+                </state_interface>
+                <state_interface name="velocity"/>
+            </joint>
+        </ros2_control>
+    </xacro:macro>
+
+</robot>

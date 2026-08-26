@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+
+"""Serve a phone-friendly UI and bridge its commands into ROS 2 topics."""
+
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import math
+import mimetypes
+import os
+import socket
+import threading
+import time
+from urllib.parse import urlsplit
+
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+import rclpy
+from rclpy.clock import Clock, ClockType
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64MultiArray
+
+
+class PhoneTeleopHttpServer(ThreadingHTTPServer):
+    """Threaded HTTP server carrying the ROS node and static file root."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, address, handler, node, web_root):
+        super().__init__(address, handler)
+        self.node = node
+        self.web_root = web_root
+
+
+class PhoneTeleopHandler(BaseHTTPRequestHandler):
+    """Small same-origin API; no external web framework is required."""
+
+    protocol_version = 'HTTP/1.1'
+    MAX_BODY_SIZE = 4096
+
+    def log_message(self, _format, *_args):
+        # Avoid one terminal line for every 200 ms status poll.
+        return
+
+    def _send_bytes(self, status, body, content_type, cache_control='no-store'):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', cache_control)
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header(
+            'Content-Security-Policy',
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+            "img-src 'self' data:; frame-ancestors 'none'",
+        )
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_json(self, status, payload):
+        body = json.dumps(
+            payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        self._send_bytes(
+            status, body, 'application/json; charset=utf-8')
+
+    def _read_json(self):
+        content_type = self.headers.get('Content-Type', '')
+        if not content_type.lower().startswith('application/json'):
+            raise ValueError('Content-Type phải là application/json')
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+        except ValueError as exc:
+            raise ValueError('Content-Length không hợp lệ') from exc
+        if length <= 0 or length > self.MAX_BODY_SIZE:
+            raise ValueError('Kích thước nội dung không hợp lệ')
+        try:
+            payload = json.loads(self.rfile.read(length).decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError('JSON không hợp lệ') from exc
+        if not isinstance(payload, dict):
+            raise ValueError('JSON phải là một object')
+        return payload
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if path == '/api/status':
+            self._send_json(HTTPStatus.OK, self.server.node.status_snapshot())
+            return
+
+        static_files = {
+            '/': 'index.html',
+            '/index.html': 'index.html',
+        }
+        filename = static_files.get(path)
+        if filename is None:
+            self._send_json(HTTPStatus.NOT_FOUND, {'error': 'Không tìm thấy'})
+            return
+
+        file_path = os.path.join(self.server.web_root, filename)
+        try:
+            with open(file_path, 'rb') as web_file:
+                body = web_file.read()
+        except OSError:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {'error': 'Không đọc được giao diện điện thoại'},
+            )
+            return
+        content_type = mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+        if content_type.startswith('text/'):
+            content_type += '; charset=utf-8'
+        self._send_bytes(
+            HTTPStatus.OK, body, content_type, cache_control='no-cache')
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        try:
+            payload = self._read_json()
+            if path == '/api/drive':
+                response = self.server.node.accept_drive_command(payload)
+            elif path == '/api/stop':
+                response = self.server.node.accept_stop_command('phone_stop')
+            elif path == '/api/lift':
+                response = self.server.node.accept_lift_command(payload)
+            else:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND, {'error': 'Không tìm thấy API'})
+                return
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, response)
+
+
+class PhoneTeleopNode(Node):
+    """Publish bounded teleop commands and expose measured robot status."""
+
+    def __init__(self):
+        super().__init__('phone_teleop')
+
+        self.declare_parameter('bind_address', '0.0.0.0')
+        self.declare_parameter('port', 8080)
+        self.declare_parameter('publish_rate', 20.0)
+        self.declare_parameter('command_timeout', 0.30)
+        self.declare_parameter('maximum_linear_speed', 0.50)
+        self.declare_parameter('maximum_angular_speed', 1.20)
+        self.declare_parameter('lift_step', 0.02)
+        self.declare_parameter('lift_minimum', 0.0)
+        self.declare_parameter('lift_maximum', 0.52)
+
+        self.bind_address = str(self.get_parameter('bind_address').value)
+        self.port = int(self.get_parameter('port').value)
+        self.publish_rate = float(self.get_parameter('publish_rate').value)
+        self.command_timeout = float(
+            self.get_parameter('command_timeout').value)
+        self.maximum_linear_speed = float(
+            self.get_parameter('maximum_linear_speed').value)
+        self.maximum_angular_speed = float(
+            self.get_parameter('maximum_angular_speed').value)
+        self.lift_step = float(self.get_parameter('lift_step').value)
+        self.lift_minimum = float(
+            self.get_parameter('lift_minimum').value)
+        self.lift_maximum = float(
+            self.get_parameter('lift_maximum').value)
+
+        if not 1 <= self.port <= 65535:
+            raise ValueError('port phải nằm trong [1, 65535]')
+        if self.publish_rate <= 0.0 or self.command_timeout <= 0.0:
+            raise ValueError('publish_rate và command_timeout phải dương')
+        if self.command_timeout > 0.50:
+            raise ValueError('command_timeout không được vượt quá 0.50 s')
+        if self.maximum_linear_speed <= 0.0:
+            raise ValueError('maximum_linear_speed phải dương')
+        if self.maximum_linear_speed > 0.50:
+            raise ValueError('maximum_linear_speed không được vượt quá 0.50 m/s')
+        if self.maximum_angular_speed <= 0.0:
+            raise ValueError('maximum_angular_speed phải dương')
+        if not 0.0 <= self.lift_minimum < self.lift_maximum <= 0.52:
+            raise ValueError('giới hạn càng phải nằm trong [0.0, 0.52] m')
+
+        self._lock = threading.Lock()
+        self._drive_linear = 0.0
+        self._drive_angular = 0.0
+        self._drive_active = False
+        self._stop_pending = False
+        self._last_command_time = None
+        self._last_stop_reason = 'waiting_for_phone'
+
+        self._lift_position = None
+        self._lift_velocity = 0.0
+        self._lift_target = self.lift_minimum
+        self._lift_target_initialized = False
+        self._lift_command_pending = False
+        self._last_joint_state_time = None
+
+        self._odom_x = 0.0
+        self._odom_y = 0.0
+        self._odom_yaw = 0.0
+        self._actual_linear = 0.0
+        self._actual_angular = 0.0
+        self._last_odom_time = None
+
+        self._cmd_vel_publisher = self.create_publisher(
+            Twist, '/cmd_vel', 10)
+        self._lift_publisher = self.create_publisher(
+            Float64MultiArray, '/lift_controller/commands', 10)
+        self.create_subscription(
+            Odometry, '/odom', self._odom_callback, qos_profile_sensor_data)
+        self.create_subscription(
+            JointState,
+            '/joint_states',
+            self._joint_state_callback,
+            qos_profile_sensor_data,
+        )
+        # Safety timing must never pause with Gazebo's simulated /clock.
+        # A steady wall clock still expires the command if Gazebo is paused,
+        # /clock disappears, or the simulator is running slower than real time.
+        self._safety_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.create_timer(
+            1.0 / self.publish_rate,
+            self._control_tick,
+            clock=self._safety_clock,
+        )
+
+        package_share = get_package_share_directory('tai_robot_one')
+        web_root = os.path.join(package_share, 'web', 'phone_teleop')
+        if not os.path.isfile(os.path.join(web_root, 'index.html')):
+            raise RuntimeError(f'Không tìm thấy giao diện web tại {web_root}')
+
+        self._http_server = PhoneTeleopHttpServer(
+            (self.bind_address, self.port),
+            PhoneTeleopHandler,
+            self,
+            web_root,
+        )
+        self._http_thread = threading.Thread(
+            target=self._http_server.serve_forever,
+            name='phone-teleop-http',
+            daemon=True,
+        )
+        self._http_thread.start()
+
+        self.get_logger().info(
+            f'Phone teleop đang nghe tại {self.bind_address}:{self.port}')
+        addresses = self._local_ipv4_addresses()
+        if addresses:
+            for address in addresses:
+                self.get_logger().info(
+                    f'Mở trên điện thoại: http://{address}:{self.port}')
+        else:
+            self.get_logger().info(
+                f'Mở trên điện thoại: http://<IP-laptop>:{self.port}')
+        self.get_logger().warning(
+            'Điều khiển web này dành cho mô phỏng nội bộ; STOP trên web '
+            'không thay thế E-stop cứng của robot thật.')
+
+    @staticmethod
+    def _local_ipv4_addresses():
+        addresses = set()
+        try:
+            for item in socket.getaddrinfo(
+                    socket.gethostname(), None, socket.AF_INET):
+                address = item[4][0]
+                if not address.startswith('127.'):
+                    addresses.add(address)
+        except socket.gaierror:
+            pass
+        return sorted(addresses)
+
+    @staticmethod
+    def _finite_number(payload, key):
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f'{key} phải là một số')
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f'{key} phải hữu hạn')
+        return value
+
+    def accept_drive_command(self, payload):
+        linear = self._finite_number(payload, 'linear')
+        angular = self._finite_number(payload, 'angular')
+        linear = min(
+            self.maximum_linear_speed,
+            max(-self.maximum_linear_speed, linear),
+        )
+        angular = min(
+            self.maximum_angular_speed,
+            max(-self.maximum_angular_speed, angular),
+        )
+        now = time.monotonic()
+        with self._lock:
+            self._drive_linear = linear
+            self._drive_angular = angular
+            self._drive_active = True
+            self._stop_pending = False
+            self._last_command_time = now
+            self._last_stop_reason = 'phone_command_active'
+        return {'ok': True, 'linear': linear, 'angular': angular}
+
+    def accept_stop_command(self, reason):
+        with self._lock:
+            self._drive_linear = 0.0
+            self._drive_angular = 0.0
+            self._drive_active = False
+            self._stop_pending = True
+            self._last_stop_reason = reason
+        return {'ok': True, 'stopped': True}
+
+    def accept_lift_command(self, payload):
+        action = payload.get('action')
+        if action not in ('up', 'down', 'top', 'bottom'):
+            raise ValueError('action phải là up, down, top hoặc bottom')
+        with self._lock:
+            if action == 'up':
+                target = self._lift_target + self.lift_step
+            elif action == 'down':
+                target = self._lift_target - self.lift_step
+            elif action == 'top':
+                target = self.lift_maximum
+            else:
+                target = self.lift_minimum
+            self._lift_target = min(
+                self.lift_maximum, max(self.lift_minimum, target))
+            self._lift_target_initialized = True
+            self._lift_command_pending = True
+            bounded_target = self._lift_target
+        return {'ok': True, 'target': bounded_target}
+
+    def _publish_stop(self):
+        self._cmd_vel_publisher.publish(Twist())
+
+    def _control_tick(self):
+        now = time.monotonic()
+        publish_drive = False
+        publish_stop = False
+        publish_lift = False
+        linear = 0.0
+        angular = 0.0
+        lift_target = self.lift_minimum
+
+        with self._lock:
+            if self._drive_active:
+                age = (
+                    math.inf if self._last_command_time is None
+                    else now - self._last_command_time
+                )
+                if age <= self.command_timeout:
+                    publish_drive = True
+                    linear = self._drive_linear
+                    angular = self._drive_angular
+                else:
+                    self._drive_active = False
+                    self._drive_linear = 0.0
+                    self._drive_angular = 0.0
+                    self._stop_pending = True
+                    self._last_stop_reason = 'web_watchdog_timeout'
+            if self._stop_pending:
+                publish_stop = True
+                self._stop_pending = False
+            if self._lift_command_pending:
+                publish_lift = True
+                lift_target = self._lift_target
+                self._lift_command_pending = False
+
+        if publish_stop:
+            self._publish_stop()
+        elif publish_drive:
+            command = Twist()
+            command.linear.x = linear
+            command.angular.z = angular
+            self._cmd_vel_publisher.publish(command)
+
+        if publish_lift:
+            command = Float64MultiArray()
+            command.data = [lift_target]
+            self._lift_publisher.publish(command)
+
+    def _odom_callback(self, message):
+        orientation = message.pose.pose.orientation
+        sin_yaw = 2.0 * (
+            orientation.w * orientation.z
+            + orientation.x * orientation.y
+        )
+        cos_yaw = 1.0 - 2.0 * (
+            orientation.y * orientation.y
+            + orientation.z * orientation.z
+        )
+        now = time.monotonic()
+        with self._lock:
+            self._odom_x = float(message.pose.pose.position.x)
+            self._odom_y = float(message.pose.pose.position.y)
+            self._odom_yaw = math.atan2(sin_yaw, cos_yaw)
+            self._actual_linear = float(message.twist.twist.linear.x)
+            self._actual_angular = float(message.twist.twist.angular.z)
+            self._last_odom_time = now
+
+    def _joint_state_callback(self, message):
+        try:
+            index = message.name.index('lift_joint')
+        except ValueError:
+            return
+        if index >= len(message.position):
+            return
+        position = float(message.position[index])
+        if not math.isfinite(position):
+            return
+        velocity = 0.0
+        if index < len(message.velocity):
+            candidate = float(message.velocity[index])
+            if math.isfinite(candidate):
+                velocity = candidate
+        now = time.monotonic()
+        with self._lock:
+            self._lift_position = position
+            self._lift_velocity = velocity
+            self._last_joint_state_time = now
+            if not self._lift_target_initialized:
+                self._lift_target = min(
+                    self.lift_maximum,
+                    max(self.lift_minimum, position),
+                )
+
+    @staticmethod
+    def _age_or_none(now, timestamp):
+        if timestamp is None:
+            return None
+        return max(0.0, now - timestamp)
+
+    def status_snapshot(self):
+        now = time.monotonic()
+        with self._lock:
+            odom_age = self._age_or_none(now, self._last_odom_time)
+            joint_age = self._age_or_none(now, self._last_joint_state_time)
+            command_age = self._age_or_none(now, self._last_command_time)
+            return {
+                'ros': {
+                    'odom_ready': odom_age is not None and odom_age < 1.0,
+                    'joint_state_ready': (
+                        joint_age is not None and joint_age < 1.0),
+                    'odom_age': odom_age,
+                    'joint_state_age': joint_age,
+                },
+                'drive': {
+                    'command_active': self._drive_active,
+                    'command_age': command_age,
+                    'command_linear': self._drive_linear,
+                    'command_angular': self._drive_angular,
+                    'actual_linear': self._actual_linear,
+                    'actual_angular': self._actual_angular,
+                    'last_stop_reason': self._last_stop_reason,
+                    'timeout': self.command_timeout,
+                },
+                'pose': {
+                    'x': self._odom_x,
+                    'y': self._odom_y,
+                    'yaw': self._odom_yaw,
+                },
+                'lift': {
+                    'position': self._lift_position,
+                    'velocity': self._lift_velocity,
+                    'target': self._lift_target,
+                },
+                'limits': {
+                    'linear': self.maximum_linear_speed,
+                    'angular': self.maximum_angular_speed,
+                    'lift_minimum': self.lift_minimum,
+                    'lift_maximum': self.lift_maximum,
+                },
+            }
+
+    def close(self):
+        self.accept_stop_command('server_shutdown')
+        # launch may already have invalidated the rclpy context on SIGINT.
+        if rclpy.ok():
+            self._publish_stop()
+        try:
+            self._http_server.shutdown()
+        except KeyboardInterrupt:
+            # launch may deliver SIGINT while Python is waiting for the HTTP
+            # thread; the thread is daemonized and socket close still follows.
+            pass
+        finally:
+            self._http_server.server_close()
+        try:
+            self._http_thread.join(timeout=2.0)
+        except KeyboardInterrupt:
+            pass
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = None
+    try:
+        node = PhoneTeleopNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if node is not None:
+            node.close()
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

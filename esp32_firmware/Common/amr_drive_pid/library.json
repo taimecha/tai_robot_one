@@ -1,0 +1,11 @@
+{
+  "name": "amr-drive-pid",
+  "version": "1.0.0",
+  "description": "Shared fixed-rate wheel velocity PID for the AMR base and its bench tuner",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src"
+  }
+}

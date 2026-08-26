@@ -9,14 +9,25 @@
     <xacro:property name="astra_horizontal_fov" value="${60.0 * pi / 180.0}"/>
     <xacro:property name="astra_vertical_fov" value="${49.5 * pi / 180.0}"/>
     <xacro:property name="astra_diagonal_fov" value="${73.0 * pi / 180.0}"/>
-    <xacro:property name="astra_image_width" value="640"/>
-    <xacro:property name="astra_image_height" value="480"/>
+    <!-- Laptop-friendly simulation profile. 320 x 240 at 10 Hz preserves the
+         camera geometry while producing 12x fewer pixels per second than
+         640 x 480 at 30 Hz. -->
+    <xacro:property name="astra_image_width" value="320"/>
+    <xacro:property name="astra_image_height" value="240"/>
+    <xacro:property name="astra_update_rate" value="10"/>
     <xacro:property name="astra_fx"
                     value="${(astra_image_width / 2.0)
                              / tan(astra_horizontal_fov / 2.0)}"/>
     <xacro:property name="astra_fy"
                     value="${(astra_image_height / 2.0)
                              / tan(astra_vertical_fov / 2.0)}"/>
+    <!-- Rendering and measurement limits are intentionally different.
+         An object closer than the Astra depth limit still physically occludes
+         the RGB and IR cameras; using 0.6 m as the renderer near plane makes
+         Gazebo incorrectly draw the background through that object.  Render
+         from 5 mm, then astra_sim_range_filter marks measurements below the
+         real 0.6 m limit invalid on the ROS depth and point-cloud topics. -->
+    <xacro:property name="astra_render_near" value="0.005"/>
     <xacro:property name="astra_min_depth" value="0.6"/>
     <xacro:property name="astra_max_depth" value="8.0"/>
     <!-- Measured on the real robot: ground to the centre of the camera eye. -->
@@ -106,21 +117,28 @@
         <gazebo reference="camera_link">
             <sensor name="astra_pro_rgbd" type="rgbd_camera">
                 <always_on>true</always_on>
-                <update_rate>30</update_rate>
+                <update_rate>${astra_update_rate}</update_rate>
                 <visualize>false</visualize>
                 <topic>/camera</topic>
-                <gz_frame_id>camera_link_optical</gz_frame_id>
+                <!-- Gazebo Harmonic generates RGB-D points in its native
+                     camera coordinates: X forward, Y left, Z up. Setting an
+                     optical_frame_id changes only the message header; it does
+                     not rotate the XYZ values into ROS optical coordinates.
+                     Label the simulated data with the frame it actually uses
+                     so TF performs the camera_link -> optical conversion only
+                     when a consumer explicitly requests the optical frame. -->
+                <gz_frame_id>camera_link</gz_frame_id>
                 <camera>
-                    <optical_frame_id>camera_link_optical</optical_frame_id>
+                    <optical_frame_id>camera_link</optical_frame_id>
                     <!-- Separate fx/fy values below reproduce 60 deg horizontal
-                         and 49.5 deg vertical FOV at 640 x 480. -->
+                         and 49.5 deg vertical FOV at the selected resolution. -->
                     <horizontal_fov>${astra_horizontal_fov}</horizontal_fov>
                     <image>
                         <width>${astra_image_width}</width>
                         <height>${astra_image_height}</height>
                     </image>
                     <clip>
-                        <near>${astra_min_depth}</near>
+                        <near>${astra_render_near}</near>
                         <far>${astra_max_depth}</far>
                     </clip>
                     <lens>

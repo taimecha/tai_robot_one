@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#101820">
+  <title>TAI Robot One</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1117;
+      --panel: #121c25;
+      --panel-2: #182632;
+      --line: #2b3d49;
+      --text: #f4f7f9;
+      --muted: #9db0bd;
+      --green: #40d890;
+      --yellow: #f1c75b;
+      --red: #ff5d67;
+      --blue: #57a8ff;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      overscroll-behavior: none;
+      user-select: none;
+    }
+    main { width: min(100%, 720px); margin: 0 auto; padding: 14px 14px 32px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    h1 { margin: 0; font-size: clamp(20px, 5vw, 28px); letter-spacing: .02em; }
+    .connection { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--red); box-shadow: 0 0 12px currentColor; }
+    .dot.online { background: var(--green); }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 14px; margin-bottom: 12px; }
+    .panel h2 { margin: 0 0 12px; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .12em; }
+    .telemetry { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+    .metric { background: var(--panel-2); border-radius: 12px; padding: 11px; min-width: 0; }
+    .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .metric strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 18px; font-variant-numeric: tabular-nums; }
+    .status-line { margin-top: 10px; color: var(--muted); font-size: 13px; min-height: 20px; }
+    .status-line.ok { color: var(--green); }
+    .status-line.warn { color: var(--yellow); }
+    .drive-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(72px, 1fr));
+      grid-template-rows: repeat(3, 76px);
+      gap: 10px;
+      touch-action: none;
+    }
+    button {
+      border: 1px solid #3a5262;
+      border-radius: 15px;
+      background: linear-gradient(180deg, #263b4a, #1b2b36);
+      color: var(--text);
+      font: inherit;
+      font-weight: 750;
+      cursor: pointer;
+      touch-action: none;
+    }
+    button:active, button.active { transform: scale(.96); border-color: var(--blue); background: #234d6c; }
+    .direction { font-size: 26px; }
+    #forward { grid-column: 2; grid-row: 1; }
+    #left { grid-column: 1; grid-row: 2; }
+    #stop { grid-column: 2; grid-row: 2; background: linear-gradient(180deg, #a52e38, #761f28); border-color: #e05761; font-size: 17px; }
+    #right { grid-column: 3; grid-row: 2; }
+    #reverse { grid-column: 2; grid-row: 3; }
+    .slider-row { display: grid; grid-template-columns: 80px 1fr 64px; align-items: center; gap: 10px; margin-top: 13px; color: var(--muted); font-size: 13px; }
+    input[type="range"] { width: 100%; accent-color: var(--blue); }
+    #speedValue { color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+    .lift-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .lift-grid button { min-height: 58px; }
+    .lift-grid .primary { border-color: #318e66; background: linear-gradient(180deg, #23684e, #174a38); }
+    .hint { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .warning { color: var(--yellow); }
+    @media (min-width: 560px) {
+      .telemetry { grid-template-columns: repeat(4, 1fr); }
+      .controls { display: grid; grid-template-columns: 1.3fr 1fr; gap: 12px; }
+      .controls .panel { margin-bottom: 0; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>TAI ROBOT ONE</h1>
+      <div class="connection"><span id="connectionDot" class="dot"></span><span id="connectionText">Đang kết nối</span></div>
+    </header>
+
+    <section class="panel">
+      <h2>Phản hồi mô phỏng</h2>
+      <div class="telemetry">
+        <div class="metric"><span>Vận tốc thực</span><strong id="actualLinear">-- m/s</strong></div>
+        <div class="metric"><span>Quay thực</span><strong id="actualAngular">-- rad/s</strong></div>
+        <div class="metric"><span>Độ cao càng</span><strong id="liftPosition">-- m</strong></div>
+        <div class="metric"><span>Vị trí X / Y</span><strong id="robotPose">-- / --</strong></div>
+      </div>
+      <div id="robotStatus" class="status-line">Đang chờ /odom và /joint_states…</div>
+    </section>
+
+    <div class="controls">
+      <section class="panel">
+        <h2>Di chuyển — giữ nút để chạy</h2>
+        <div class="drive-grid" aria-label="Điều khiển hướng">
+          <button id="forward" class="direction" data-direction="forward" aria-label="Tiến">▲</button>
+          <button id="left" class="direction" data-direction="left" aria-label="Quẹo trái">◀</button>
+          <button id="stop" aria-label="Dừng">DỪNG</button>
+          <button id="right" class="direction" data-direction="right" aria-label="Quẹo phải">▶</button>
+          <button id="reverse" class="direction" data-direction="reverse" aria-label="Lùi">▼</button>
+        </div>
+        <div class="slider-row">
+          <label for="speed">Tốc độ</label>
+          <input id="speed" type="range" min="0.05" max="0.50" step="0.05" value="0.25">
+          <span id="speedValue">0.25 m/s</span>
+        </div>
+        <p class="hint">Có thể giữ đồng thời tiến/lùi và trái/phải. Thả tay, chuyển ứng dụng hoặc mất Wi‑Fi sẽ kích hoạt dừng.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Càng nâng</h2>
+        <div class="lift-grid">
+          <button class="primary" data-lift="up">Nâng +2 cm</button>
+          <button data-lift="down">Hạ −2 cm</button>
+          <button class="primary" data-lift="top">Lên 52 cm</button>
+          <button data-lift="bottom">Về 0 cm</button>
+        </div>
+        <div class="metric" style="margin-top:10px"><span>Mục tiêu càng</span><strong id="liftTarget">-- m</strong></div>
+        <p class="hint warning">DỪNG trên web là dừng phần mềm mô phỏng, không phải E‑stop cứng.</p>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const activePointers = new Map();
+    const activeDirections = new Set();
+    let heartbeatTimer = null;
+    let online = false;
+    let requestInFlight = false;
+    const speedSlider = document.getElementById('speed');
+    const speedValue = document.getElementById('speedValue');
+
+    function finite(value, fallback = 0) {
+      return Number.isFinite(value) ? value : fallback;
+    }
+
+    async function postJson(path, payload) {
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+        cache: 'no-store',
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      return result;
+    }
+
+    function currentCommand() {
+      const speed = Number(speedSlider.value);
+      const forward = activeDirections.has('forward') ? 1 : 0;
+      const reverse = activeDirections.has('reverse') ? 1 : 0;
+      const left = activeDirections.has('left') ? 1 : 0;
+      const right = activeDirections.has('right') ? 1 : 0;
+      return {
+        linear: speed * (forward - reverse),
+        angular: 0.8 * (left - right),
+      };
+    }
+
+    async function sendDrive() {
+      if (requestInFlight || activeDirections.size === 0) return;
+      requestInFlight = true;
+      try {
+        await postJson('/api/drive', currentCommand());
+      } catch (error) {
+        markOffline(error.message);
+      } finally {
+        requestInFlight = false;
+      }
+    }
+
+    async function sendStop() {
+      try {
+        await postJson('/api/stop', {});
+      } catch (error) {
+        markOffline(error.message);
+      }
+    }
+
+    function startHeartbeat() {
+      if (heartbeatTimer === null) {
+        heartbeatTimer = window.setInterval(sendDrive, 100);
+      }
+      sendDrive();
+    }
+
+    function stopHeartbeat() {
+      if (heartbeatTimer !== null) {
+        window.clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    }
+
+    function releaseAllDirections(send = true) {
+      activePointers.clear();
+      activeDirections.clear();
+      document.querySelectorAll('.direction').forEach(button => button.classList.remove('active'));
+      stopHeartbeat();
+      if (send) sendStop();
+    }
+
+    document.querySelectorAll('[data-direction]').forEach(button => {
+      button.addEventListener('pointerdown', event => {
+        event.preventDefault();
+        button.setPointerCapture(event.pointerId);
+        activePointers.set(event.pointerId, button.dataset.direction);
+        activeDirections.add(button.dataset.direction);
+        button.classList.add('active');
+        startHeartbeat();
+      });
+      const release = event => {
+        const direction = activePointers.get(event.pointerId);
+        if (!direction) return;
+        activePointers.delete(event.pointerId);
+        if (![...activePointers.values()].includes(direction)) {
+          activeDirections.delete(direction);
+          button.classList.remove('active');
+        }
+        if (activeDirections.size === 0) {
+          stopHeartbeat();
+          sendStop();
+        } else {
+          sendDrive();
+        }
+      };
+      button.addEventListener('pointerup', release);
+      button.addEventListener('pointercancel', release);
+      button.addEventListener('lostpointercapture', release);
+    });
+
+    document.getElementById('stop').addEventListener('pointerdown', event => {
+      event.preventDefault();
+      releaseAllDirections(true);
+    });
+
+    document.querySelectorAll('[data-lift]').forEach(button => {
+      button.addEventListener('click', async () => {
+        try {
+          const result = await postJson('/api/lift', {action: button.dataset.lift});
+          document.getElementById('liftTarget').textContent = `${finite(result.target).toFixed(3)} m`;
+        } catch (error) {
+          markOffline(error.message);
+        }
+      });
+    });
+
+    speedSlider.addEventListener('input', () => {
+      speedValue.textContent = `${Number(speedSlider.value).toFixed(2)} m/s`;
+      if (activeDirections.size > 0) sendDrive();
+    });
+
+    function markOffline(detail = '') {
+      online = false;
+      document.getElementById('connectionDot').classList.remove('online');
+      document.getElementById('connectionText').textContent = detail ? 'Mất kết nối' : 'Đang kết nối';
+    }
+
+    function format(value, digits = 3) {
+      return Number.isFinite(value) ? value.toFixed(digits) : '--';
+    }
+
+    async function updateStatus() {
+      try {
+        const response = await fetch('/api/status', {cache: 'no-store'});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const status = await response.json();
+        online = true;
+        document.getElementById('connectionDot').classList.add('online');
+        document.getElementById('connectionText').textContent = 'Đã kết nối';
+        document.getElementById('actualLinear').textContent = `${format(status.drive.actual_linear)} m/s`;
+        document.getElementById('actualAngular').textContent = `${format(status.drive.actual_angular)} rad/s`;
+        document.getElementById('liftPosition').textContent = `${format(status.lift.position)} m`;
+        document.getElementById('liftTarget').textContent = `${format(status.lift.target)} m`;
+        document.getElementById('robotPose').textContent = `${format(status.pose.x, 2)} / ${format(status.pose.y, 2)}`;
+        const robotStatus = document.getElementById('robotStatus');
+        if (status.ros.odom_ready && status.ros.joint_state_ready) {
+          robotStatus.className = 'status-line ok';
+          robotStatus.textContent = status.drive.command_active
+            ? `Đang nhận lệnh điện thoại · watchdog ${status.drive.timeout.toFixed(2)} s`
+            : 'ROS 2 sẵn sàng · xe đang dừng';
+        } else {
+          robotStatus.className = 'status-line warn';
+          robotStatus.textContent = 'Web đã kết nối nhưng đang chờ dữ liệu /odom hoặc /joint_states';
+        }
+      } catch (error) {
+        markOffline(error.message);
+      }
+    }
+
+    window.addEventListener('blur', () => releaseAllDirections(true));
+    window.addEventListener('pagehide', () => releaseAllDirections(true));
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) releaseAllDirections(true);
+    });
+    window.setInterval(updateStatus, 200);
+    updateStatus();
+  </script>
+</body>
+</html>

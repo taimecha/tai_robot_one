@@ -22,6 +22,10 @@
                     value="${fork_gap / 2 + fork_width / 2}"/>
 
     <xacro:property name="lift_travel" value="0.520"/>
+    <!-- One millimetre of numerical margin prevents Gazebo's physical stop
+         and tiny negative round-off from fighting the PID target at 0.000 m.
+         Public commands and real hardware remain 0.000-0.520 m. -->
+    <xacro:property name="lift_joint_limit_margin" value="0.001"/>
     <!-- At lift_joint=0, the underside of each fork is 65 mm above ground. -->
     <xacro:property name="fork_ground_clearance" value="0.065"/>
 
@@ -225,7 +229,8 @@
                          ${fork_ground_clearance + fork_thickness / 2 - mast_bottom_ground}"
                     rpy="0 0 0"/>
             <axis xyz="0 0 1"/>
-            <limit lower="0.0" upper="${lift_travel}"
+            <limit lower="${-lift_joint_limit_margin}"
+                   upper="${lift_travel + lift_joint_limit_margin}"
                    effort="${lift_max_force}" velocity="${lift_max_velocity}"/>
             <dynamics damping="5.0" friction="2.0"/>
         </joint>

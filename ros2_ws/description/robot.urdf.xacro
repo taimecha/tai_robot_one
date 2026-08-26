@@ -1,6 +1,23 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robot">
 
+    <!-- Simulation is the current default.  A real-hardware launch can set
+         use_sim:=false and provide its serial SystemInterface plugin name. -->
+    <xacro:arg name="use_sim" default="true"/>
+    <xacro:arg name="hardware_plugin"
+               default="gz_ros2_control/GazeboSimSystem"/>
+    <xacro:arg name="controllers_file"
+               default="$(find tai_robot_one)/config/ros2_controllers.yaml"/>
+
+    <!-- Real-hardware parameters are ignored by gz_ros2_control. Stable udev
+         symlinks are mandatory because ttyUSB numbering is not deterministic. -->
+    <xacro:arg name="drive_serial_port" default="/dev/tai_drive"/>
+    <xacro:arg name="lift_serial_port" default="/dev/tai_lift"/>
+    <xacro:arg name="home_lift_on_activate" default="true"/>
+    <xacro:arg name="serial_startup_timeout_ms" default="3000"/>
+    <xacro:arg name="serial_telemetry_timeout_ms" default="250"/>
+    <xacro:arg name="lift_home_timeout_ms" default="70000"/>
+
     <xacro:include filename="robot_core.xacro"/>
 
 </robot>

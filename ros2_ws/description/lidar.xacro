@@ -68,39 +68,31 @@
             </xacro:inertial_box>
         </link>
 
-        <gazebo reference="lidar_link">
-            <sensor name="rplidar_a1m8" type="gpu_lidar">
-                <always_on>true</always_on>
-                <!-- A1M8 nominal rotation rate is 5.5 revolutions/second. -->
-                <update_rate>5.5</update_rate>
-                <!-- RViz still displays /scan; disable the duplicate Gazebo
-                     ray visualization to avoid an extra render workload. -->
-                <visualize>false</visualize>
+        <!-- Gazebo Harmonic's Ogre1 GpuRays backend returns zero for every ray
+             on Ubuntu 24.04.  Use DART physics raycasts so RGB-D may keep the
+             stable Ogre1 renderer while /scan remains independent of graphics. -->
+        <gazebo>
+            <plugin filename="libtai_physics_lidar.so"
+                    name="tai_robot_one::PhysicsLidar">
+                <frame_id>lidar_link</frame_id>
+                <!-- Fixed joints are lumped into base_footprint by URDF->SDF.
+                     Express the laser eye pose in that physics link. -->
+                <parent_link>base_footprint</parent_link>
+                <sensor_pose>${chassis_length / 2.0 + mast_profile / 2.0 + lidar_x_on_mount} 0
+                              ${lidar_scan_height_ground} 0 0 0</sensor_pose>
                 <topic>/scan</topic>
-                <gz_frame_id>lidar_link</gz_frame_id>
-                <ray>
-                    <scan>
-                        <horizontal>
-                            <!-- 360 rays give one-degree angular spacing,
-                                 matching the published A1 angular-resolution limit. -->
-                            <samples>360</samples>
-                            <resolution>1</resolution>
-                            <min_angle>${-pi}</min_angle>
-                            <max_angle>${pi}</max_angle>
-                        </horizontal>
-                    </scan>
-                    <range>
-                        <min>0.15</min>
-                        <max>12.0</max>
-                        <resolution>0.01</resolution>
-                    </range>
-                    <noise>
-                        <type>gaussian</type>
-                        <mean>0</mean>
-                        <stddev>0.003</stddev>
-                    </noise>
-                </ray>
-            </sensor>
+                <!-- Run the A1M8 at exactly 7 revolutions/second, within its
+                     manufacturer-supported configurable scan-rate range. -->
+                <update_rate>7.0</update_rate>
+                <!-- Preserve the A1M8 sampling rate of approximately 8 kHz:
+                     1143 samples/rev * 7 rev/s = 8001 samples/s. -->
+                <samples>1143</samples>
+                <angle_min>${-pi}</angle_min>
+                <angle_max>${pi}</angle_max>
+                <range_min>0.15</range_min>
+                <range_max>12.0</range_max>
+                <noise_stddev>0.003</noise_stddev>
+            </plugin>
         </gazebo>
     </xacro:macro>
 

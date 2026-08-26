@@ -9,15 +9,15 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64MultiArray
 
 
 HELP = """
 Giữ W : tiến             Giữ S : lùi
 Giữ W+A : quẹo trái     Giữ W+D : quẹo phải
 Giữ S+A/S+D : lùi và quẹo tương ứng
-Thả hết W/A/S/D : dừng bánh ngay
-Space : dừng khẩn
+Thả hết W/A/S/D : gửi vận tốc 0
+Space : dừng lệnh di chuyển (không thay thế E-stop cứng)
 
 R : nâng càng 2 cm       F : hạ càng 2 cm
 T : nâng tối đa 52 cm    G : hạ về 0 cm
@@ -53,7 +53,7 @@ class KeyboardTeleop(Node):
 
         self.cmd_vel_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         self.lift_publisher = self.create_publisher(
-            Float64, '/lift_position', 10)
+            Float64MultiArray, '/lift_controller/commands', 10)
         self.joint_state_subscription = self.create_subscription(
             JointState,
             '/joint_states',
@@ -138,8 +138,8 @@ class KeyboardTeleop(Node):
         self.cmd_vel_publisher.publish(twist)
 
         if self.lift_command_active:
-            lift = Float64()
-            lift.data = self.lift_target
+            lift = Float64MultiArray()
+            lift.data = [self.lift_target]
             self.lift_publisher.publish(lift)
 
     def status(self):

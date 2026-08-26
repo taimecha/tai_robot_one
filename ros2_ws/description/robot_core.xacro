@@ -7,6 +7,7 @@
     <xacro:include filename="lidar.xacro"/>
     <xacro:include filename="camera_astra_pro.xacro"/>
     <xacro:include filename="sensor_mount.xacro"/>
+    <xacro:include filename="ros2_control.xacro"/>
     <xacro:include filename="gazebo_control.xacro"/>
     <xacro:include filename="battery_pack.xacro"/>
 
@@ -21,6 +22,11 @@
     <xacro:property name="wheel_track" value="0.428"/>
     <xacro:property name="wheel_radius" value="0.0875"/>
     <xacro:property name="wheel_width" value="0.035"/>
+    <!-- Safety limit used by both the body controller and each wheel command
+         interface.  0.50 m/s corresponds to 5.714 rad/s at this radius. -->
+    <xacro:property name="max_vehicle_linear_speed" value="0.50"/>
+    <xacro:property name="max_wheel_speed_rad_s"
+                    value="${max_vehicle_linear_speed / wheel_radius}"/>
     <!-- Estimated total mass of one rubber-tyred, plastic-rim wheel. -->
     <xacro:property name="wheel_mass" value="0.5"/>
     <!-- Visual estimate only; update this when the actual rim is measured. -->
@@ -434,7 +440,14 @@
     <!-- Rear-mounted 8S2P 32140 LiFePO4 battery inside the chassis. -->
     <xacro:lfp_battery_pack parent="chassis"/>
 
-    <!-- Native Gazebo Harmonic drive, lift and joint-state systems. -->
-    <xacro:gazebo_control_plugins/>
+    <!-- Stable controller-facing contract shared by simulation and hardware. -->
+    <xacro:tai_robot_ros2_control hardware_plugin="$(arg hardware_plugin)"/>
+
+    <!-- The Gazebo plugin creates controller_manager inside the simulated
+         model.  A real-hardware launch starts controller_manager itself. -->
+    <xacro:if value="$(arg use_sim)">
+        <xacro:gazebo_ros2_control_plugin
+            controllers_file="$(arg controllers_file)"/>
+    </xacro:if>
 
 </robot>
