@@ -35,7 +35,7 @@
     <!-- Dry rough ceramic tile: longitudinal grip and reduced lateral grip
          for four-wheel skid-steer turning. These require real-world tuning. -->
     <xacro:property name="tire_ground_mu_longitudinal" value="0.85"/>
-    <xacro:property name="tire_ground_mu_lateral" value="0.45"/>
+    <xacro:property name="tire_ground_mu_lateral" value="0.12"/>
 
     <!--
       MGL42GM-895, 24 V, 71:1 gearbox (the purchased 140 RPM version).
@@ -173,7 +173,7 @@
                             x="${chassis_length}"
                             y="${chassis_width}"
                             z="${chassis_height}">
-            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <origin xyz="-0.080 0 -0.050" rpy="0 0 0"/>
         </xacro:inertial_box>
     </link>
 
@@ -388,9 +388,9 @@
             </visual>
 
             <collision>
-                <origin xyz="0 0 0" rpy="${pi / 2} 0 0"/>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
                 <geometry>
-                    <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+                    <sphere radius="${wheel_radius}"/>
                 </geometry>
             </collision>
 
