@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Explicit simulation test: send the two user-specified map goals in sequence.
+
+Run only with an isolated Gazebo navigation stack; this script commands motion.
+Print machine-readable results without treating an action timeout as success.
+"""
+import json
+import argparse
+import math
+import time
+
+import rclpy
+from nav2_msgs.action import NavigateToPose
+from lifecycle_msgs.srv import GetState
+from rclpy.action import ActionClient
+from rclpy.parameter import Parameter
+from tf2_ros import Buffer, TransformListener
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--scenario', choices=[
+        'round_trip', 'south_pillar', 'escape_only', 'west_wall_escape'], default='round_trip')
+    args = parser.parse_args()
+    rclpy.init()
+    node = rclpy.create_node('nav_round_trip_test', parameter_overrides=[
+        Parameter('use_sim_time', value=True)])
+    buffer = Buffer()
+    listener = TransformListener(buffer, node)
+    client = ActionClient(node, NavigateToPose, '/navigate_to_pose')
+    state_client = node.create_client(GetState, '/bt_navigator/get_state')
+    deadline = time.monotonic() + 60
+    active = False
+    while time.monotonic() < deadline:
+        if not state_client.wait_for_service(timeout_sec=1):
+            continue
+        state = state_client.call_async(GetState.Request())
+        rclpy.spin_until_future_complete(node, state, timeout_sec=2)
+        if state.done() and state.result().current_state.id == 3:
+            active = True
+            break
+        rclpy.spin_once(node, timeout_sec=.2)
+    if not active:
+        raise RuntimeError('bt_navigator did not become active')
+    if not client.wait_for_server(timeout_sec=60.0):
+        raise RuntimeError('NavigateToPose server unavailable')
+    goals = [
+            (1.532, -1.412, -0.012), (0.0, 0.0, 0.0),
+            (1.532, -1.412, -0.012), (0.0, 0.0, 0.0)]
+    if args.scenario == 'south_pillar':
+        # The first pose was read from the user's stalled simulation. The
+        # second XY was read from its navigation log; pi is a test heading.
+        goals = [(-.0218, -1.4967, 2.5174), (-.97, -1.53, math.pi), (0., 0., 0.)]
+    elif args.scenario == 'escape_only':
+        goals = [(-.97, -1.53, math.pi), (0., 0., 0.)]
+    elif args.scenario == 'west_wall_escape':
+        # Launch with spawn_x=-1.6314285 spawn_y=1.9168707 spawn_yaw=2.8164593.
+        # Starting there avoids teleporting across an already-populated costmap.
+        goals = [(0., 0., 0.), (1.532, -1.412, -.012), (0., 0., 0.)]
+    for leg, (x, y, yaw) in enumerate(goals, 1):
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = node.get_clock().now().to_msg()
+        goal.pose.pose.position.x = x
+        goal.pose.pose.position.y = y
+        goal.pose.pose.orientation.z = math.sin(yaw / 2)
+        goal.pose.pose.orientation.w = math.cos(yaw / 2)
+        feedback = {}
+
+        def update(message):
+            feedback['recoveries'] = message.feedback.number_of_recoveries
+            feedback['distance_remaining'] = message.feedback.distance_remaining
+
+        future = client.send_goal_async(goal, feedback_callback=update)
+        rclpy.spin_until_future_complete(node, future, timeout_sec=15)
+        if not future.done() or not future.result().accepted:
+            raise RuntimeError('Goal not accepted')
+        handle = future.result()
+        result = handle.get_result_async()
+        start = time.monotonic()
+        next_report = start + 15
+        print(json.dumps({'leg': leg, 'goal': [x, y, yaw], 'event': 'started'}), flush=True)
+        while not result.done() and time.monotonic() - start < 180:
+            rclpy.spin_once(node, timeout_sec=0.1)
+            if time.monotonic() > next_report:
+                print(json.dumps({'leg': leg, 'event': 'progress', **feedback}), flush=True)
+                next_report += 15
+        if not result.done():
+            cancel = handle.cancel_goal_async()
+            rclpy.spin_until_future_complete(node, cancel, timeout_sec=5)
+            status = 'TIMEOUT'
+        else:
+            status = result.result().status
+        record = {'leg': leg, 'status': status,
+                  'wall_seconds': round(time.monotonic() - start, 2), **feedback}
+        try:
+            pose = buffer.lookup_transform('map', 'base_footprint', rclpy.time.Time()).transform
+            q = pose.rotation
+            heading = math.atan2(2 * (q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
+            record['pose'] = [pose.translation.x, pose.translation.y, heading]
+            record['xy_error'] = math.hypot(pose.translation.x-x, pose.translation.y-y)
+            record['yaw_error'] = math.atan2(math.sin(heading-yaw), math.cos(heading-yaw))
+        except Exception as exc:
+            record['tf_error'] = str(exc)
+        print(json.dumps(record), flush=True)
+        if status != 4:
+            break
+        wait_end = time.monotonic() + 2
+        while time.monotonic() < wait_end:
+            rclpy.spin_once(node, timeout_sec=.1)
+    client.destroy()
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

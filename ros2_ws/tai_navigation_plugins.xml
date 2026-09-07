@@ -1,0 +1,5 @@
+<library path="tai_safe_rotation_rpp">
+  <class name="tai_robot_one::SafeRotationRPP" type="tai_robot_one::SafeRotationRPP" base_class_type="nav2_core::Controller">
+    <description>RPP with collision-checked, direction-latched full heading sweeps.</description>
+  </class>
+</library>

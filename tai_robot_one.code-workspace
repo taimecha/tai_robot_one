@@ -1,0 +1,17 @@
+{
+    "folders": [
+        {
+            "name": "tai_robot_one",
+            "path": "."
+        },
+        {
+            "name": "ESP32 - AMR firmware",
+            "path": "esp32_firmware/Projects/amr_firmware"
+        },
+        {
+            "name": "ESP32 - Cang nang ha",
+            "path": "esp32_firmware/Projects/cang_nang_ha"
+        }
+    ],
+    "settings": {}
+}

@@ -1,0 +1,74 @@
+controller_manager:
+  ros__parameters:
+    use_sim_time: false
+    # Match the base firmware PID/protocol rate and keep the 115200-baud lift
+    # link comfortably below saturation.
+    update_rate: 50
+    enforce_command_limits: true
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    base_controller:
+      type: diff_drive_controller/DiffDriveController
+
+    lift_controller:
+      type: position_controllers/JointGroupPositionController
+
+base_controller:
+  ros__parameters:
+    use_sim_time: false
+    left_wheel_names:
+      - front_left_wheel_joint
+      - rear_left_wheel_joint
+    right_wheel_names:
+      - front_right_wheel_joint
+      - rear_right_wheel_joint
+
+    wheel_separation: 0.428
+    wheel_radius: 0.0875
+    wheel_separation_multiplier: 1.0
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+
+    publish_rate: 50.0
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+    tf_frame_prefix_enable: false
+    pose_covariance_diagonal: [0.01, 0.01, 1000000.0, 1000000.0, 1000000.0, 0.10]
+    twist_covariance_diagonal: [0.02, 0.02, 1000000.0, 1000000.0, 1000000.0, 0.20]
+    open_loop: false
+    position_feedback: true
+    # robot_localization owns odom -> base_footprint on the real robot.
+    # Keep this controller's /base_controller/odom as the raw wheel source.
+    enable_odom_tf: false
+    velocity_rolling_window_size: 10
+
+    # The ROS timeout acts before the ESP32's 300 ms motion watchdog. The
+    # hardware backend never repeats an old /cmd_vel; each serial CMD is fresh.
+    cmd_vel_timeout: 0.25
+    publish_limited_velocity: true
+
+    linear.x.max_velocity: 0.50
+    linear.x.min_velocity: -0.50
+    linear.x.max_acceleration: 0.50
+    linear.x.max_deceleration: -0.50
+    linear.x.max_acceleration_reverse: -0.50
+    linear.x.max_deceleration_reverse: 0.50
+    linear.x.max_jerk: .NAN
+    linear.x.min_jerk: .NAN
+
+    angular.z.max_velocity: 1.20
+    angular.z.min_velocity: -1.20
+    angular.z.max_acceleration: 1.50
+    angular.z.max_deceleration: -1.50
+    angular.z.max_acceleration_reverse: -1.50
+    angular.z.max_deceleration_reverse: 1.50
+    angular.z.max_jerk: .NAN
+    angular.z.min_jerk: .NAN
+
+lift_controller:
+  ros__parameters:
+    use_sim_time: false
+    joints:
+      - lift_joint

@@ -22,8 +22,34 @@
                     value="${fork_gap / 2 + fork_width / 2}"/>
 
     <xacro:property name="lift_travel" value="0.520"/>
+    <!-- One millimetre of numerical margin prevents Gazebo's physical stop
+         and tiny negative round-off from fighting the PID target at 0.000 m.
+         Public commands and real hardware remain 0.000-0.520 m. -->
+    <xacro:property name="lift_joint_limit_margin" value="0.001"/>
     <!-- At lift_joint=0, the underside of each fork is 65 mm above ground. -->
     <xacro:property name="fork_ground_clearance" value="0.065"/>
+
+    <!--
+      Lift drivetrain, synchronized with ESP32 Projects/cang_nang_ha:
+      - 1.8 degree stepper, >=0.7 N.m holding torque
+      - direct-drive T8x8 lead screw (8 mm travel per revolution)
+      - 50 mm/s maximum travel = 375 screw RPM
+
+      The supplied stepper sheet has no torque-speed curve. At 375 RPM, use a
+      conservative 50% of holding torque and 30% T8 screw efficiency. This
+      gives about 82.47 N available axial lift force. Update these two factors
+      after measuring current and lift force on the real mechanism.
+    -->
+    <xacro:property name="stepper_holding_torque" value="0.700"/>
+    <xacro:property name="stepper_running_torque_factor" value="0.50"/>
+    <xacro:property name="t8_screw_lead" value="0.008"/>
+    <xacro:property name="t8_screw_efficiency" value="0.30"/>
+    <xacro:property name="lift_max_velocity" value="0.05"/>
+    <xacro:property name="stepper_available_torque"
+                    value="${stepper_holding_torque * stepper_running_torque_factor}"/>
+    <xacro:property name="lift_max_force"
+                    value="${2.0 * pi * t8_screw_efficiency
+                             * stepper_available_torque / t8_screw_lead}"/>
 
     <!-- Dimensions below are visual estimates pending direct measurement. -->
     <xacro:property name="mast_profile" value="0.030"/>
@@ -203,7 +229,9 @@
                          ${fork_ground_clearance + fork_thickness / 2 - mast_bottom_ground}"
                     rpy="0 0 0"/>
             <axis xyz="0 0 1"/>
-            <limit lower="0.0" upper="${lift_travel}" effort="1000.0" velocity="0.05"/>
+            <limit lower="${-lift_joint_limit_margin}"
+                   upper="${lift_travel + lift_joint_limit_margin}"
+                   effort="${lift_max_force}" velocity="${lift_max_velocity}"/>
             <dynamics damping="5.0" friction="2.0"/>
         </joint>
 

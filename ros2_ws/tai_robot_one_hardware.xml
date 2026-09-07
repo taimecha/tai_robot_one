@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<library path="tai_robot_one_hardware">
+  <class
+    name="tai_robot_one/TaiRobotSerialSystem"
+    type="tai_robot_one::TaiRobotSerialSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Composite two-port USB serial backend for the four-wheel drive ESP32 and
+      the independent lift ESP32.
+    </description>
+  </class>
+</library>

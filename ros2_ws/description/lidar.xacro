@@ -1,0 +1,145 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- SLAMTEC RPLIDAR A1M8 mounted above the fixed forklift mast.
+         Manufacturer envelope: 96.8 x 70.3 x 55 mm, mass: 170 g. -->
+    <xacro:property name="lidar_body_width" value="0.0968"/>
+    <xacro:property name="lidar_body_depth" value="0.0703"/>
+    <xacro:property name="lidar_body_height" value="0.055"/>
+    <xacro:property name="lidar_turret_radius" value="0.033"/>
+    <xacro:property name="lidar_mass" value="0.170"/>
+    <!-- Measured on the real robot: ground to the centre of the laser eye. -->
+    <xacro:property name="lidar_scan_height_ground" value="0.835"/>
+
+    <material name="lidar_black">
+        <color rgba="0.035 0.040 0.045 1"/>
+    </material>
+
+    <material name="lidar_red">
+        <color rgba="0.75 0.04 0.04 1"/>
+    </material>
+
+    <xacro:macro name="fork_mast_lidar"
+                 params="parent x:=0.0 y:=0.0 z:=0.0">
+        <joint name="lidar_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="lidar_link"/>
+            <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+        </joint>
+
+        <!-- lidar_link is the optical scan plane, exactly z=0.835 m. -->
+        <link name="lidar_link">
+            <visual name="a1m8_base_visual">
+                <!-- Bottom of the lidar sits on the common sensor plate. -->
+                <origin xyz="0 0 -0.0375" rpy="0 0 0"/>
+                <geometry>
+                    <box size="${lidar_body_width} ${lidar_body_depth} 0.025"/>
+                </geometry>
+                <material name="lidar_black"/>
+            </visual>
+            <visual name="a1m8_turret_visual">
+                <origin xyz="0 0 -0.0125" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${lidar_turret_radius}" length="0.035"/>
+                </geometry>
+                <material name="lidar_red"/>
+            </visual>
+            <visual name="a1m8_top_cap_visual">
+                <origin xyz="0 0 0.0025" rpy="0 0 0"/>
+                <geometry>
+                    <cylinder radius="${lidar_turret_radius * 0.72}" length="0.005"/>
+                </geometry>
+                <material name="lidar_black"/>
+            </visual>
+            <collision name="a1m8_body_collision">
+                <!-- The scan plane is 5 mm below the top of the housing. -->
+                <origin xyz="0 0 ${-lidar_body_height / 2 + 0.005}"
+                        rpy="0 0 0"/>
+                <geometry>
+                    <box size="${lidar_body_width} ${lidar_body_depth} ${lidar_body_height}"/>
+                </geometry>
+            </collision>
+            <xacro:inertial_box mass="${lidar_mass}"
+                                x="${lidar_body_width}"
+                                y="${lidar_body_depth}"
+                                z="${lidar_body_height}">
+                <origin xyz="0 0 ${-lidar_body_height / 2 + 0.005}"
+                        rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+
+        <!-- Gazebo Harmonic's Ogre1 GpuRays backend returns zero for every ray
+             on Ubuntu 24.04.  Use DART physics raycasts so RGB-D may keep the
+             stable Ogre1 renderer while /scan remains independent of graphics. -->
+        <gazebo>
+            <plugin filename="libtai_physics_lidar.so"
+                    name="tai_robot_one::PhysicsLidar">
+                <frame_id>lidar_link</frame_id>
+                <!-- Fixed joints are lumped into base_footprint by URDF->SDF.
+                     Express the laser eye pose in that physics link. -->
+                <parent_link>base_footprint</parent_link>
+                <sensor_pose>${chassis_length / 2.0 + mast_profile / 2.0 + lidar_x_on_mount} 0
+                              ${lidar_scan_height_ground} 0 0 0</sensor_pose>
+                <topic>/scan</topic>
+                <!-- Run the A1M8 at exactly 7 revolutions/second, within its
+                     manufacturer-supported configurable scan-rate range. -->
+                <update_rate>7.0</update_rate>
+                <!-- Preserve the A1M8 sampling rate of approximately 8 kHz:
+                     1143 samples/rev * 7 rev/s = 8001 samples/s. -->
+                <samples>1143</samples>
+                <angle_min>${-pi}</angle_min>
+                <angle_max>${pi}</angle_max>
+                <range_min>0.15</range_min>
+                <range_max>12.0</range_max>
+                <noise_stddev>0.003</noise_stddev>
+            </plugin>
+        </gazebo>
+    </xacro:macro>
+
+    <!-- Simulation-only low forward safety scanner. It represents the
+         near-field sensor that must be fitted near the fork tips on the real
+         vehicle before in-place turning is allowed beside a rack. -->
+    <xacro:macro name="simulated_fork_safety_lidar"
+                 params="parent x:=0.68 y:=0.0 z:=0.12 prefix:=fork yaw:=0.0">
+        <joint name="${prefix}_safety_joint" type="fixed">
+            <parent link="${parent}"/>
+            <child link="${prefix}_safety_link"/>
+            <origin xyz="${x} ${y} ${z}" rpy="0 0 ${yaw}"/>
+        </joint>
+        <link name="${prefix}_safety_link">
+            <!-- Tiny inertial keeps this otherwise massless sensor frame as
+                 an SDF link when preserveFixedJoint is enabled. -->
+            <inertial>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <mass value="0.001"/>
+                <inertia ixx="0.000001" ixy="0" ixz="0"
+                         iyy="0.000001" iyz="0" izz="0.000001"/>
+            </inertial>
+        </link>
+
+        <!-- Keep a distinct Gazebo physics entity.  Both simulated scanners
+             use RaycastData, so lumping this fixed joint into base_footprint
+             would make their requests overwrite each other. -->
+        <gazebo reference="${prefix}_safety_joint">
+            <preserveFixedJoint>true</preserveFixedJoint>
+        </gazebo>
+
+        <gazebo>
+            <plugin filename="libtai_physics_lidar.so"
+                    name="tai_robot_one::PhysicsLidar">
+                <frame_id>${prefix}_safety_link</frame_id>
+                <parent_link>${prefix}_safety_link</parent_link>
+                <sensor_pose>0 0 0 0 0 0</sensor_pose>
+                <topic>/${prefix}_scan</topic>
+                <update_rate>20.0</update_rate>
+                <samples>361</samples>
+                <angle_min>${-pi / 2.0}</angle_min>
+                <angle_max>${pi / 2.0}</angle_max>
+                <range_min>0.03</range_min>
+                <range_max>2.0</range_max>
+                <noise_stddev>0.002</noise_stddev>
+            </plugin>
+        </gazebo>
+    </xacro:macro>
+
+</robot>

@@ -6,6 +6,8 @@ ros2_ws/install/
 ros2_ws/log/
 esp32_firmware/.pio/
 esp32_firmware/.vscode/
+**/.pio/
 __pycache__/
 *.pyc
+compile_commands.json
 .DS_Store

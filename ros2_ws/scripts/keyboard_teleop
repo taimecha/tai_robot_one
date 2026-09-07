@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 
-"""Keyboard teleoperation for the simulated skid-steer base and lift."""
+"""GUI keyboard teleoperation for the simulated skid-steer base and lift."""
 
-import select
-import sys
-import termios
-import time
-import tty
+import tkinter as tk
 
 from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64MultiArray
 
 
 HELP = """
-Điều khiển mô phỏng TAI Robot One
----------------------------------
 Giữ W : tiến             Giữ S : lùi
-Giữ A : quay trái        Giữ D : quay phải
-Space : dừng bánh
+Giữ W+A : quẹo trái     Giữ W+D : quẹo phải
+Giữ S+A/S+D : lùi và quẹo tương ứng
+Thả hết W/A/S/D : gửi vận tốc 0
+Space : dừng lệnh di chuyển (không thay thế E-stop cứng)
 
 R : nâng càng 2 cm       F : hạ càng 2 cm
 T : nâng tối đa 52 cm    G : hạ về 0 cm
 
-Q : dừng robot và thoát
+Q : dừng robot và đóng cửa sổ
 """
 
 
@@ -41,7 +37,6 @@ class KeyboardTeleop(Node):
         self.declare_parameter('lift_step', 0.02)
         self.declare_parameter('lift_min', 0.0)
         self.declare_parameter('lift_max', 0.52)
-        self.declare_parameter('deadman_timeout', 0.75)
         self.declare_parameter('publish_rate', 20.0)
 
         self.linear_speed = float(self.get_parameter('linear_speed').value)
@@ -49,18 +44,16 @@ class KeyboardTeleop(Node):
         self.lift_step = float(self.get_parameter('lift_step').value)
         self.lift_min = float(self.get_parameter('lift_min').value)
         self.lift_max = float(self.get_parameter('lift_max').value)
-        self.deadman_timeout = float(
-            self.get_parameter('deadman_timeout').value)
         self.publish_rate = float(self.get_parameter('publish_rate').value)
 
         if not 0.0 <= self.lift_min < self.lift_max <= 0.52:
             raise ValueError('lift limits must stay inside [0.0, 0.52] m')
-        if self.publish_rate <= 0.0 or self.deadman_timeout <= 0.0:
-            raise ValueError('publish_rate and deadman_timeout must be positive')
+        if self.publish_rate <= 0.0:
+            raise ValueError('publish_rate must be positive')
 
         self.cmd_vel_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         self.lift_publisher = self.create_publisher(
-            Float64, '/lift_position', 10)
+            Float64MultiArray, '/lift_controller/commands', 10)
         self.joint_state_subscription = self.create_subscription(
             JointState,
             '/joint_states',
@@ -72,7 +65,7 @@ class KeyboardTeleop(Node):
         self.angular = 0.0
         self.lift_target = self.lift_min
         self.lift_command_active = False
-        self.last_drive_key = 0.0
+        self.pressed_keys = set()
         self.running = True
 
     def joint_state_callback(self, message):
@@ -88,22 +81,16 @@ class KeyboardTeleop(Node):
                 self.lift_max,
                 max(self.lift_min, message.position[index]))
 
-    def process_key(self, key):
-        now = time.monotonic()
-        if key == 'w':
-            self.linear, self.angular = self.linear_speed, 0.0
-            self.last_drive_key = now
-        elif key == 's':
-            self.linear, self.angular = -self.linear_speed, 0.0
-            self.last_drive_key = now
-        elif key == 'a':
-            self.linear, self.angular = 0.0, self.angular_speed
-            self.last_drive_key = now
-        elif key == 'd':
-            self.linear, self.angular = 0.0, -self.angular_speed
-            self.last_drive_key = now
-        elif key == ' ':
-            self.linear, self.angular = 0.0, 0.0
+    def press_key(self, key):
+        """Handle one physical key-down event."""
+        if key in self.pressed_keys:
+            return
+        self.pressed_keys.add(key)
+
+        if key in ('w', 'a', 's', 'd'):
+            self.update_drive_from_keys()
+        elif key == 'space':
+            self.release_drive_keys()
         elif key == 'r':
             self.lift_command_active = True
             self.lift_target = min(
@@ -118,15 +105,31 @@ class KeyboardTeleop(Node):
         elif key == 'g':
             self.lift_command_active = True
             self.lift_target = self.lift_min
-        elif key in ('q', '\x03'):
-            self.linear, self.angular = 0.0, 0.0
-            self.running = False
 
-    def apply_deadman(self):
-        if self.linear == 0.0 and self.angular == 0.0:
-            return
-        if time.monotonic() - self.last_drive_key > self.deadman_timeout:
-            self.linear, self.angular = 0.0, 0.0
+    def release_key(self, key):
+        """Handle one physical key-up event."""
+        self.pressed_keys.discard(key)
+        if key in ('w', 'a', 's', 'd'):
+            self.update_drive_from_keys()
+
+    def update_drive_from_keys(self):
+        """Calculate Twist from the complete set of keys still held down."""
+        forward = int('w' in self.pressed_keys)
+        reverse = int('s' in self.pressed_keys)
+        left = int('a' in self.pressed_keys)
+        right = int('d' in self.pressed_keys)
+        self.linear = self.linear_speed * (forward - reverse)
+        self.angular = self.angular_speed * (left - right)
+
+    def release_drive_keys(self):
+        """Clear all drive keys and stop the base immediately."""
+        self.pressed_keys.difference_update(('w', 'a', 's', 'd'))
+        self.linear, self.angular = 0.0, 0.0
+
+    def release_all_keys(self):
+        """Fail-safe stop used when the control window loses focus."""
+        self.pressed_keys.clear()
+        self.linear, self.angular = 0.0, 0.0
 
     def publish(self):
         twist = Twist()
@@ -135,49 +138,184 @@ class KeyboardTeleop(Node):
         self.cmd_vel_publisher.publish(twist)
 
         if self.lift_command_active:
-            lift = Float64()
-            lift.data = self.lift_target
+            lift = Float64MultiArray()
+            lift.data = [self.lift_target]
             self.lift_publisher.publish(lift)
 
     def status(self):
+        drive_keys = '+'.join(
+            key.upper() for key in ('w', 'a', 's', 'd')
+            if key in self.pressed_keys)
         return (
             f'V={self.linear:+.2f} m/s  W={self.angular:+.2f} rad/s  '
-            f'Lift={self.lift_target:.2f} m')
+            f'Lift={self.lift_target:.2f} m  '
+            f'Phím={drive_keys or "-"}')
 
 
-def read_key(timeout):
-    readable, _, _ = select.select([sys.stdin], [], [], timeout)
-    if readable:
-        return sys.stdin.read(1).lower()
-    return ''
+class TeleopWindow:
+    """Focused Tk window that provides reliable key-down/key-up events."""
+
+    CONTROL_KEYS = frozenset(('w', 'a', 's', 'd', 'r', 'f', 't', 'g', 'space'))
+
+    def __init__(self, node):
+        self.node = node
+        self.root = tk.Tk()
+        self.root.title('TAI Robot One - Keyboard Teleop')
+        self.root.geometry('620x410')
+        self.root.minsize(560, 370)
+        self.root.configure(background='#20252b')
+        self.closing = False
+        self.pending_releases = {}
+
+        title = tk.Label(
+            self.root,
+            text='TAI ROBOT ONE - ĐIỀU KHIỂN BẰNG PHÍM',
+            font=('Sans', 15, 'bold'),
+            foreground='#ffffff',
+            background='#20252b',
+        )
+        title.pack(pady=(18, 8))
+
+        instructions = tk.Label(
+            self.root,
+            text=HELP.strip(),
+            justify=tk.LEFT,
+            font=('Monospace', 11),
+            foreground='#e8edf2',
+            background='#20252b',
+        )
+        instructions.pack(padx=24, anchor='w')
+
+        self.focus_label = tk.Label(
+            self.root,
+            text='Cửa sổ đang nhận phím',
+            font=('Sans', 11, 'bold'),
+            foreground='#4ade80',
+            background='#20252b',
+        )
+        self.focus_label.pack(pady=(14, 5))
+
+        self.status_label = tk.Label(
+            self.root,
+            text=self.node.status(),
+            font=('Monospace', 11, 'bold'),
+            foreground='#facc15',
+            background='#111418',
+            padx=12,
+            pady=8,
+        )
+        self.status_label.pack(fill=tk.X, padx=18, pady=(0, 12))
+
+        self.root.bind_all('<KeyPress>', self.on_key_press)
+        self.root.bind_all('<KeyRelease>', self.on_key_release)
+        self.root.bind('<FocusIn>', self.on_focus_in)
+        self.root.bind('<FocusOut>', self.on_focus_out)
+        self.root.protocol('WM_DELETE_WINDOW', self.close)
+
+        period_ms = max(1, round(1000.0 / self.node.publish_rate))
+        self.root.after(period_ms, self.tick)
+        self.root.after(100, self.root.focus_force)
+
+    @staticmethod
+    def normalize_key(event):
+        key = event.keysym.lower()
+        return 'space' if key == 'space' else key
+
+    def on_key_press(self, event):
+        key = self.normalize_key(event)
+        if key == 'q':
+            self.close()
+            return 'break'
+        if key not in self.CONTROL_KEYS:
+            return None
+
+        # X11 may synthesize KeyRelease/KeyPress pairs during auto-repeat.
+        # Cancel that pending release so a held key remains continuously active.
+        release_id = self.pending_releases.pop(key, None)
+        if release_id is not None:
+            self.root.after_cancel(release_id)
+        self.node.press_key(key)
+        self.node.publish()
+        self.refresh_status()
+        return 'break'
+
+    def on_key_release(self, event):
+        key = self.normalize_key(event)
+        if key not in self.CONTROL_KEYS:
+            return None
+        old_release_id = self.pending_releases.pop(key, None)
+        if old_release_id is not None:
+            self.root.after_cancel(old_release_id)
+        self.pending_releases[key] = self.root.after_idle(
+            self.finish_key_release, key)
+        return 'break'
+
+    def finish_key_release(self, key):
+        self.pending_releases.pop(key, None)
+        self.node.release_key(key)
+        self.node.publish()
+        self.refresh_status()
+
+    def on_focus_in(self, _event):
+        if self.closing:
+            return
+        self.focus_label.configure(
+            text='Cửa sổ đang nhận phím', foreground='#4ade80')
+
+    def on_focus_out(self, _event):
+        if self.closing:
+            return
+        self.cancel_pending_releases()
+        self.node.release_all_keys()
+        self.node.publish()
+        self.focus_label.configure(
+            text='MẤT FOCUS - ROBOT ĐÃ DỪNG (bấm vào cửa sổ)',
+            foreground='#fb7185',
+        )
+        self.refresh_status()
+
+    def cancel_pending_releases(self):
+        for release_id in self.pending_releases.values():
+            self.root.after_cancel(release_id)
+        self.pending_releases.clear()
+
+    def refresh_status(self):
+        self.status_label.configure(text=self.node.status())
+
+    def tick(self):
+        if self.closing:
+            return
+        if not rclpy.ok():
+            self.close()
+            return
+        rclpy.spin_once(self.node, timeout_sec=0.0)
+        self.node.publish()
+        self.refresh_status()
+        period_ms = max(1, round(1000.0 / self.node.publish_rate))
+        self.root.after(period_ms, self.tick)
+
+    def close(self):
+        if self.closing:
+            return
+        self.closing = True
+        self.cancel_pending_releases()
+        self.node.release_all_keys()
+        self.node.publish()
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
 
 
 def main(args=None):
-    if not sys.stdin.isatty():
-        raise RuntimeError('keyboard_teleop must run in an interactive terminal')
-
     rclpy.init(args=args)
     node = KeyboardTeleop()
-    original_terminal = termios.tcgetattr(sys.stdin)
-    period = 1.0 / node.publish_rate
-
-    print(HELP)
     try:
-        tty.setcbreak(sys.stdin.fileno())
-        while rclpy.ok() and node.running:
-            key = read_key(period)
-            if key:
-                node.process_key(key)
-            node.apply_deadman()
-            node.publish()
-            rclpy.spin_once(node, timeout_sec=0.0)
-            sys.stdout.write('\r' + node.status() + '   ')
-            sys.stdout.flush()
+        window = TeleopWindow(node)
+        window.run()
     finally:
-        node.linear, node.angular = 0.0, 0.0
+        node.release_all_keys()
         node.publish()
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal)
-        print('\nĐã dừng robot.')
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

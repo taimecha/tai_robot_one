@@ -4,6 +4,10 @@
     <xacro:include filename="inertial_macros.xacro"/>
     <xacro:include filename="forklift.xacro"/>
     <xacro:include filename="imu_bno055.xacro"/>
+    <xacro:include filename="lidar.xacro"/>
+    <xacro:include filename="camera_astra_pro.xacro"/>
+    <xacro:include filename="sensor_mount.xacro"/>
+    <xacro:include filename="ros2_control.xacro"/>
     <xacro:include filename="gazebo_control.xacro"/>
     <xacro:include filename="battery_pack.xacro"/>
 
@@ -18,6 +22,11 @@
     <xacro:property name="wheel_track" value="0.428"/>
     <xacro:property name="wheel_radius" value="0.0875"/>
     <xacro:property name="wheel_width" value="0.035"/>
+    <!-- Safety limit used by both the body controller and each wheel command
+         interface.  0.50 m/s corresponds to 5.714 rad/s at this radius. -->
+    <xacro:property name="max_vehicle_linear_speed" value="0.50"/>
+    <xacro:property name="max_wheel_speed_rad_s"
+                    value="${max_vehicle_linear_speed / wheel_radius}"/>
     <!-- Estimated total mass of one rubber-tyred, plastic-rim wheel. -->
     <xacro:property name="wheel_mass" value="0.5"/>
     <!-- Visual estimate only; update this when the actual rim is measured. -->
@@ -26,9 +35,27 @@
     <!-- Dry rough ceramic tile: longitudinal grip and reduced lateral grip
          for four-wheel skid-steer turning. These require real-world tuning. -->
     <xacro:property name="tire_ground_mu_longitudinal" value="0.85"/>
-    <xacro:property name="tire_ground_mu_lateral" value="0.45"/>
+    <xacro:property name="tire_ground_mu_lateral" value="0.12"/>
 
-    <!-- MGL42GM-895, 24 V / 100 RPM (100:1 gearbox), from the supplied drawing. -->
+    <!--
+      MGL42GM-895, 24 V, 71:1 gearbox (the purchased 140 RPM version).
+      Datasheet column 71: 140 RPM no-load, 126 RPM rated,
+      30 kgf.cm rated torque and 98 kgf.cm stall torque.
+
+      wheel_joint effort uses stall torque as the short-duration peak needed
+      to start a skid-steer turn. The rated torque remains the continuous
+      thermal limit; Gazebo does not model motor temperature or duty cycle.
+    -->
+    <xacro:property name="motor_gear_ratio" value="71.0"/>
+    <xacro:property name="motor_no_load_speed_rpm" value="140.0"/>
+    <xacro:property name="motor_rated_speed_rpm" value="126.0"/>
+    <xacro:property name="kgf_cm_to_nm" value="0.0980665"/>
+    <xacro:property name="motor_rated_torque"
+                    value="${30.0 * kgf_cm_to_nm}"/>
+    <xacro:property name="motor_stall_torque"
+                    value="${98.0 * kgf_cm_to_nm}"/>
+    <xacro:property name="motor_no_load_speed_rad_s"
+                    value="${motor_no_load_speed_rpm * 2.0 * pi / 60.0}"/>
     <xacro:property name="motor_body_length" value="0.072"/>
     <xacro:property name="motor_body_radius" value="0.025"/>
     <xacro:property name="gearbox_length" value="0.0535"/>
@@ -146,7 +173,7 @@
                             x="${chassis_length}"
                             y="${chassis_width}"
                             z="${chassis_height}">
-            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <origin xyz="-0.080 0 -0.050" rpy="0 0 0"/>
         </xacro:inertial_box>
     </link>
 
@@ -267,6 +294,9 @@
             <child link="${position}_wheel"/>
             <origin xyz="${x} ${y} 0" rpy="0 0 0"/>
             <axis xyz="0 1 0"/>
+            <!-- 9.611 N.m short-duration peak; continuous rating is 2.942 N.m. -->
+            <limit effort="${motor_stall_torque}"
+                   velocity="${motor_no_load_speed_rad_s}"/>
             <dynamics damping="0.1" friction="0.1"/>
         </joint>
 
@@ -358,9 +388,9 @@
             </visual>
 
             <collision>
-                <origin xyz="0 0 0" rpy="${pi / 2} 0 0"/>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
                 <geometry>
-                    <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+                    <sphere radius="${wheel_radius}"/>
                 </geometry>
             </collision>
 
@@ -401,13 +431,27 @@
     <!-- Front lift mast and the 0-520 mm prismatic fork mechanism. -->
     <xacro:forklift_assembly parent="base_link"/>
 
+    <!-- Common top bracket: lidar eye at 0.835 m and Astra Pro eye at 0.800 m. -->
+    <xacro:mast_sensor_mount parent="mast_frame"/>
+
     <!-- BNO055 mounted near the centre of the chassis top surface. -->
     <xacro:bno055_imu parent="chassis" x="0.0" y="0.0" yaw="0.0"/>
 
     <!-- Rear-mounted 8S2P 32140 LiFePO4 battery inside the chassis. -->
     <xacro:lfp_battery_pack parent="chassis"/>
 
-    <!-- Native Gazebo Harmonic drive, lift and joint-state systems. -->
-    <xacro:gazebo_control_plugins/>
+    <!-- Stable controller-facing contract shared by simulation and hardware. -->
+    <xacro:tai_robot_ros2_control hardware_plugin="$(arg hardware_plugin)"/>
+
+    <!-- The Gazebo plugin creates controller_manager inside the simulated
+         model.  A real-hardware launch starts controller_manager itself. -->
+    <xacro:if value="$(arg use_sim)">
+        <xacro:simulated_fork_safety_lidar parent="base_footprint"/>
+        <!-- Simulation rear low scanner; real reverse recovery requires an equivalent sensor. -->
+        <xacro:simulated_fork_safety_lidar parent="base_footprint"
+            prefix="rear" x="-0.34" z="0.12" yaw="${pi}"/>
+        <xacro:gazebo_ros2_control_plugin
+            controllers_file="$(arg controllers_file)"/>
+    </xacro:if>
 
 </robot>

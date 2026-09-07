@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+
+"""Position loop for the simulated forklift lift effort interface."""
+
+import math
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64MultiArray
+
+
+class LiftPositionController(Node):
+    """Convert a bounded lift position target into simulated actuator force."""
+
+    def __init__(self):
+        super().__init__('lift_position_controller')
+
+        self.declare_parameter('joint_name', 'lift_joint')
+        self.declare_parameter('minimum_position', 0.0)
+        self.declare_parameter('maximum_position', 0.52)
+        self.declare_parameter('maximum_effort', 82.4668)
+        self.declare_parameter('moving_mass', 4.0)
+        self.declare_parameter('gravity', 9.81)
+        self.declare_parameter('friction_compensation', 2.0)
+        self.declare_parameter('position_tolerance', 0.0002)
+        self.declare_parameter('kp', 1200.0)
+        self.declare_parameter('ki', 0.0)
+        self.declare_parameter('kd', 80.0)
+        self.declare_parameter('integral_limit', 0.02)
+        self.declare_parameter('control_rate', 50.0)
+
+        self.joint_name = str(self.get_parameter('joint_name').value)
+        self.minimum_position = float(
+            self.get_parameter('minimum_position').value)
+        self.maximum_position = float(
+            self.get_parameter('maximum_position').value)
+        self.maximum_effort = float(
+            self.get_parameter('maximum_effort').value)
+        self.gravity_effort = (
+            float(self.get_parameter('moving_mass').value)
+            * float(self.get_parameter('gravity').value)
+        )
+        self.friction_compensation = float(
+            self.get_parameter('friction_compensation').value)
+        self.position_tolerance = float(
+            self.get_parameter('position_tolerance').value)
+        self.kp = float(self.get_parameter('kp').value)
+        self.ki = float(self.get_parameter('ki').value)
+        self.kd = float(self.get_parameter('kd').value)
+        self.integral_limit = float(
+            self.get_parameter('integral_limit').value)
+        self.control_rate = float(self.get_parameter('control_rate').value)
+
+        if not self.minimum_position < self.maximum_position:
+            raise ValueError('minimum_position must be below maximum_position')
+        if self.maximum_effort <= 0.0 or self.control_rate <= 0.0:
+            raise ValueError('maximum_effort and control_rate must be positive')
+        if self.friction_compensation < 0.0 or self.position_tolerance < 0.0:
+            raise ValueError(
+                'friction_compensation and position_tolerance cannot be negative')
+
+        self.position = None
+        self.velocity = 0.0
+        self.target = None
+        self.integral = 0.0
+
+        self.effort_publisher = self.create_publisher(
+            Float64MultiArray, '/lift_effort_controller/commands', 10)
+        self.create_subscription(
+            Float64MultiArray,
+            '/lift_controller/commands',
+            self.command_callback,
+            10,
+        )
+        self.create_subscription(
+            JointState,
+            '/joint_states',
+            self.joint_state_callback,
+            qos_profile_sensor_data,
+        )
+        self.create_timer(1.0 / self.control_rate, self.control)
+
+        self.get_logger().info(
+            'Lift position loop: /lift_controller/commands -> '
+            '/lift_effort_controller/commands')
+
+    def command_callback(self, message):
+        if len(message.data) != 1 or not math.isfinite(message.data[0]):
+            self.get_logger().warning(
+                'Ignoring lift command: expected one finite position value')
+            return
+
+        requested = float(message.data[0])
+        bounded = min(
+            self.maximum_position,
+            max(self.minimum_position, requested),
+        )
+        if bounded != requested:
+            self.get_logger().warning(
+                f'Clamped lift target {requested:.3f} m to {bounded:.3f} m')
+        if self.target is None or bounded != self.target:
+            self.integral = 0.0
+        self.target = bounded
+
+    def joint_state_callback(self, message):
+        try:
+            index = message.name.index(self.joint_name)
+        except ValueError:
+            return
+        if index >= len(message.position):
+            return
+
+        position = float(message.position[index])
+        if not math.isfinite(position):
+            return
+        self.position = position
+        if index < len(message.velocity) and math.isfinite(message.velocity[index]):
+            self.velocity = float(message.velocity[index])
+        else:
+            self.velocity = 0.0
+
+        # Do not move the lift at startup. The first explicit R/F/T/G command
+        # takes over from the measured position.
+        if self.target is None:
+            self.target = min(
+                self.maximum_position,
+                max(self.minimum_position, self.position),
+            )
+
+    def control(self):
+        output = Float64MultiArray()
+        if self.position is None or self.target is None:
+            output.data = [0.0]
+            self.effort_publisher.publish(output)
+            return
+
+        error = self.target - self.position
+        self.integral += error / self.control_rate
+        self.integral = min(
+            self.integral_limit,
+            max(-self.integral_limit, self.integral),
+        )
+
+        effort = (
+            self.gravity_effort
+            + self.kp * error
+            + self.ki * self.integral
+            - self.kd * self.velocity
+        )
+        if abs(error) > self.position_tolerance:
+            effort += math.copysign(self.friction_compensation, error)
+        effort = min(self.maximum_effort, max(-self.maximum_effort, effort))
+        output.data = [effort]
+        self.effort_publisher.publish(output)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LiftPositionController()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if rclpy.ok():
+            stop = Float64MultiArray()
+            stop.data = [0.0]
+            node.effort_publisher.publish(stop)
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
