@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <ESP32Encoder.h>
+#include <esp_bt.h>
+#include <esp_wifi.h>
 #include <esp_arduino_version.h>
 #include <math.h>
 #include <stdint.h>
@@ -47,18 +49,14 @@ struct MotorPins {
   int8_t encoder_sign;
 };
 
-// This table preserves the behavior of the original web commands:
-//   web FL -> GPIO 27/14, encoder 18/19
-//   web FR -> GPIO 32/33, encoder 23/4
-//   web BL -> GPIO 22/13, encoder 16/17
-//   web BR -> GPIO 25/26, encoder 34/35
+// Physical wiring copied from the supplied, currently working PID tuner.
 // Verify one raised wheel at a time before floor testing. If a wheel is
 // reversed, change only that row's command_sign and/or encoder_sign.
 constexpr MotorPins kMotorPins[kWheelCount] = {
-    {"FL", 27, 14, 18, 19, +1, +1},
-    {"FR", 32, 33, 23, 4, +1, +1},
-    {"RL", 22, 13, 16, 17, +1, +1},
-    {"RR", 25, 26, 34, 35, +1, +1},
+    {"FL", 33, 32, 4, 23, +1, +1},
+    {"FR", 14, 27, 34, 35, +1, +1},
+    {"RL", 25, 26, 19, 18, +1, +1},
+    {"RR", 13, 22, 16, 17, +1, +1},
 };
 
 constexpr amr_drive::PidConfig kPidConfig = {
@@ -604,6 +602,16 @@ void initializeHardware() {
 }  // namespace
 
 void setup() {
+  // ESP32 so 1 chi giao tiep USB Serial. Dam bao Wi-Fi/Bluetooth luon tat.
+  (void)esp_wifi_stop();
+  (void)esp_wifi_deinit();
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    (void)esp_bt_controller_disable();
+  }
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
+    (void)esp_bt_controller_deinit();
+  }
+
   Serial.setRxBufferSize(1024);
   Serial.begin(kSerialBaud);
   initializeHardware();

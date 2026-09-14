@@ -25,23 +25,25 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
-find_package(gz_sim_vendor REQUIRED)
-find_package(gz-sim8 REQUIRED)
-find_package(gz_transport_vendor REQUIRED)
-find_package(gz-transport13 REQUIRED)
-find_package(gz_msgs_vendor REQUIRED)
-find_package(gz-msgs10 REQUIRED)
-find_package(behaviortree_cpp REQUIRED)
+find_package(gz_sim_vendor QUIET)
+find_package(gz-sim8 QUIET)
+find_package(gz_transport_vendor QUIET)
+find_package(gz-transport13 QUIET)
+find_package(gz_msgs_vendor QUIET)
+find_package(gz-msgs10 QUIET)
+find_package(behaviortree_cpp QUIET)
 find_package(geometry_msgs REQUIRED)
-find_package(nav2_regulated_pure_pursuit_controller REQUIRED)
-find_package(nav2_core REQUIRED)
+find_package(nav2_regulated_pure_pursuit_controller QUIET)
+find_package(nav2_core QUIET)
 find_package(tf2_geometry_msgs REQUIRED)
 
-add_library(tai_safe_rotation_rpp SHARED src/safe_rotation_rpp.cpp)
-target_include_directories(tai_safe_rotation_rpp PRIVATE include)
-ament_target_dependencies(tai_safe_rotation_rpp
-  nav2_regulated_pure_pursuit_controller nav2_core tf2_geometry_msgs pluginlib)
-pluginlib_export_plugin_description_file(nav2_core tai_navigation_plugins.xml)
+if(nav2_regulated_pure_pursuit_controller_FOUND AND nav2_core_FOUND)
+  add_library(tai_safe_rotation_rpp SHARED src/safe_rotation_rpp.cpp)
+  target_include_directories(tai_safe_rotation_rpp PRIVATE include)
+  ament_target_dependencies(tai_safe_rotation_rpp
+    nav2_regulated_pure_pursuit_controller nav2_core tf2_geometry_msgs pluginlib)
+  pluginlib_export_plugin_description_file(nav2_core tai_navigation_plugins.xml)
+endif()
 
 # Fast DDS is the validated middleware for the current WSL mirrored-network
 # setup and the Raspberry Pi deployment. Install a workspace environment hook
@@ -72,29 +74,34 @@ pluginlib_export_plugin_description_file(
 # Rendering-independent 2D lidar for Gazebo Harmonic.  It uses DART's
 # RaycastData component, allowing the RGB-D camera to stay on Ogre1 under WSL
 # without triggering Ogre1's broken GPU-ray implementation.
-add_library(tai_physics_lidar SHARED
-  src/tai_physics_lidar.cpp
-)
-target_compile_features(tai_physics_lidar PUBLIC cxx_std_17)
-target_link_libraries(tai_physics_lidar PUBLIC
-  gz-sim8::gz-sim8
-  gz-transport13::gz-transport13
-  gz-msgs10::gz-msgs10
-)
+if(TARGET gz-sim8::gz-sim8 AND TARGET gz-transport13::gz-transport13 AND
+   TARGET gz-msgs10::gz-msgs10)
+  add_library(tai_physics_lidar SHARED
+    src/tai_physics_lidar.cpp
+  )
+  target_compile_features(tai_physics_lidar PUBLIC cxx_std_17)
+  target_link_libraries(tai_physics_lidar PUBLIC
+    gz-sim8::gz-sim8
+    gz-transport13::gz-transport13
+    gz-msgs10::gz-msgs10
+  )
+endif()
 
 # BT helper: return a recovery angle opposite to the last commanded turn.
-add_library(tai_compute_opposite_spin_bt_node SHARED
-  src/compute_opposite_spin_bt_node.cpp
-)
-target_compile_features(tai_compute_opposite_spin_bt_node PUBLIC cxx_std_17)
-target_compile_definitions(tai_compute_opposite_spin_bt_node
-  PRIVATE BT_PLUGIN_EXPORT
-)
-ament_target_dependencies(tai_compute_opposite_spin_bt_node
-  behaviortree_cpp
-  geometry_msgs
-  rclcpp
-)
+if(behaviortree_cpp_FOUND)
+  add_library(tai_compute_opposite_spin_bt_node SHARED
+    src/compute_opposite_spin_bt_node.cpp
+  )
+  target_compile_features(tai_compute_opposite_spin_bt_node PUBLIC cxx_std_17)
+  target_compile_definitions(tai_compute_opposite_spin_bt_node
+    PRIVATE BT_PLUGIN_EXPORT
+  )
+  ament_target_dependencies(tai_compute_opposite_spin_bt_node
+    behaviortree_cpp
+    geometry_msgs
+    rclcpp
+  )
+endif()
 
 if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -125,8 +132,16 @@ install(
   DESTINATION include
 )
 
+set(tai_install_targets tai_robot_one_hardware)
+foreach(optional_target
+    tai_physics_lidar tai_compute_opposite_spin_bt_node tai_safe_rotation_rpp)
+  if(TARGET ${optional_target})
+    list(APPEND tai_install_targets ${optional_target})
+  endif()
+endforeach()
+
 install(
-  TARGETS tai_robot_one_hardware tai_physics_lidar tai_compute_opposite_spin_bt_node tai_safe_rotation_rpp
+  TARGETS ${tai_install_targets}
   EXPORT export_tai_robot_one_hardware
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -161,7 +176,6 @@ install(
 
 ament_export_targets(export_tai_robot_one_hardware HAS_LIBRARY_TARGET)
 ament_export_dependencies(
-  hardware_interface pluginlib rclcpp rclcpp_lifecycle
-  gz_sim_vendor gz_transport_vendor gz_msgs_vendor)
+  hardware_interface pluginlib rclcpp rclcpp_lifecycle)
 
 ament_package()

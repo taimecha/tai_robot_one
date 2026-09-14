@@ -12,7 +12,7 @@
     <xacro:include filename="battery_pack.xacro"/>
 
     <!-- All dimensions are in metres and all masses are in kilograms. -->
-    <xacro:property name="chassis_length" value="0.605"/>
+    <xacro:property name="chassis_length" value="0.601"/>
     <xacro:property name="chassis_width" value="0.290"/>
     <xacro:property name="chassis_height" value="0.210"/>
     <xacro:property name="chassis_bottom_clearance" value="0.125"/>
@@ -150,7 +150,7 @@
 
     <link name="base_link"/>
 
-    <!-- Chassis: 605 x 290 x 210 mm, with its bottom 125 mm above ground. -->
+    <!-- Chassis: 601 x 290 x 210 mm, with its bottom 125 mm above ground. -->
     <joint name="chassis_joint" type="fixed">
         <parent link="base_link"/>
         <child link="chassis"/>
@@ -431,8 +431,20 @@
     <!-- Front lift mast and the 0-520 mm prismatic fork mechanism. -->
     <xacro:forklift_assembly parent="base_link"/>
 
-    <!-- Common top bracket: lidar eye at 0.835 m and Astra Pro eye at 0.800 m. -->
-    <xacro:mast_sensor_mount parent="mast_frame"/>
+    <!-- Simulation/final bracket keeps both sensors at their designed height.
+         On the current real robot only the camera is on that bracket; the
+         lidar temporarily sits directly on the chassis top. -->
+    <xacro:if value="$(arg use_sim)">
+        <xacro:mast_sensor_mount parent="mast_frame" include_lidar="true"/>
+    </xacro:if>
+    <xacro:unless value="$(arg use_sim)">
+        <xacro:mast_sensor_mount parent="mast_frame" include_lidar="false"/>
+        <!-- Chassis front is +0.3005 m. The scan axis is 0.437 m behind that
+             edge, hence x=-0.1365 m. The A1M8 scan plane is 50 mm above its
+             bottom, which rests on the 0.335 m-high chassis top. -->
+        <xacro:fork_mast_lidar parent="base_footprint"
+                               x="-0.1365" y="0.0" z="0.385"/>
+    </xacro:unless>
 
     <!-- BNO055 mounted near the centre of the chassis top surface. -->
     <xacro:bno055_imu parent="chassis" x="0.0" y="0.0" yaw="0.0"/>

@@ -1,295 +1,969 @@
-#include <Adafruit_BNO055.h>
-#include <Adafruit_Sensor.h>
 #include <Arduino.h>
-#include <WebServer.h>
-#include <WiFi.h>
 #include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <AccelStepper.h>
+#include <esp_bt.h>
+#include <esp_wifi.h>
 #include <math.h>
 
-namespace {
+const uint8_t BNO055_ADDRESS = 0x28;
 
-constexpr char kApSsid[] = "BNO055_IMU_MONITOR";
-constexpr char kApPassword[] = "12345678";  // Bench only; change before use.
-constexpr uint8_t kApChannel = 6;
-constexpr uint8_t kMaxClients = 2;
-constexpr uint8_t kBnoAddress = 0x28;
-constexpr uint8_t kSdaPin = 21;
-constexpr uint8_t kSclPin = 22;
-constexpr uint32_t kSamplePeriodMs = 40;  // 25 Hz
-constexpr uint32_t kRetryPeriodMs = 2000;
-constexpr uint8_t kProtocolVersion = 1;
+// Nếu không tìm thấy cảm biến, thử đổi 0x28 thành 0x29.
+Adafruit_BNO055 bno =
+  Adafruit_BNO055(55, BNO055_ADDRESS, &Wire);
 
-IPAddress localIp(192, 168, 5, 1);
-IPAddress gateway(192, 168, 5, 1);
-IPAddress subnet(255, 255, 255, 0);
-WebServer server(80);
-Adafruit_BNO055 bno(55, kBnoAddress, &Wire);
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
 
-struct ImuData {
-  bool sensor_ok = false;
-  float qx = 0.0F;
-  float qy = 0.0F;
-  float qz = 0.0F;
-  float qw = 1.0F;
-  float gx = 0.0F;
-  float gy = 0.0F;
-  float gz = 0.0F;
-  float ax = 0.0F;
-  float ay = 0.0F;
-  float az = 0.0F;
-  float roll = 0.0F;
-  float pitch = 0.0F;
-  float yaw = 0.0F;
-  uint8_t cal_system = 0;
-  uint8_t cal_gyro = 0;
-  uint8_t cal_accel = 0;
-  uint8_t cal_mag = 0;
-  uint32_t sequence = 0;
-  uint32_t sample_ms = 0;
+const int IMU_INTERVAL_MS = 20;  // 50 Hz for ROS 2 EKF.
+const int CALIBRATION_INTERVAL_MS = 1000;
+const int ZERO_SETTLE_MS = 1000;
+const int ZERO_SAMPLE_COUNT = 50;
+const int ZERO_SAMPLE_INTERVAL_MS = 20;
+
+// Càng nâng dùng chung ESP32 số 2 với BNO055. Hai công tắc nối
+// GPIO xuống GND: bình thường HIGH, chạm công tắc LOW.
+// Cau hinh da duoc thu truc tiep voi TB6600 tren xe.
+constexpr uint8_t LIFT_STEP_PIN = 23;    // PUL-
+constexpr uint8_t LIFT_DIR_PIN = 4;      // DIR-
+constexpr uint8_t LIFT_ENABLE_PIN = 19;  // EN-
+// Chieu duong/nang canh GPIO33; chieu am/ha/HOME canh GPIO32.
+constexpr uint8_t UPPER_LIMIT_PIN = 33;
+constexpr uint8_t LOWER_LIMIT_PIN = 32;
+constexpr int LIMIT_ACTIVE_LEVEL = LOW;
+constexpr long LIFT_STEPS_PER_M = 100000L;  // 1000 step/cm.
+constexpr float LIFT_MAX_POSITION_M = 0.52f;
+constexpr float LIFT_MAX_SPEED_M_S = 0.01f;        // 1000 step/s.
+constexpr float LIFT_ACCELERATION_M_S2 = 0.005f;  // 500 step/s^2.
+constexpr float LIFT_HOME_SPEED_M_S = 0.01f;
+constexpr uint32_t LIMIT_DEBOUNCE_MS = 25;
+constexpr uint32_t LIFT_COMMAND_TIMEOUT_MS = 350;
+constexpr uint32_t LIFT_HOME_TIMEOUT_MS = 60000;
+constexpr uint32_t LIFT_TELEMETRY_INTERVAL_MS = 100;
+
+AccelStepper liftStepper(AccelStepper::DRIVER, LIFT_STEP_PIN, LIFT_DIR_PIN);
+
+struct DebouncedLimit {
+  uint8_t pin;
+  bool rawActive;
+  bool active;
+  uint32_t changedAtMs;
 };
 
-ImuData imuData;
-portMUX_TYPE imuMux = portMUX_INITIALIZER_UNLOCKED;
-portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
-bool zeroRequested = false;
+DebouncedLimit lowerLimit{LOWER_LIMIT_PIN, false, false, 0};
+DebouncedLimit upperLimit{UPPER_LIMIT_PIN, false, false, 0};
 
-float invQw = 1.0F;
-float invQx = 0.0F;
-float invQy = 0.0F;
-float invQz = 0.0F;
+enum class LiftMode : uint8_t { UNHOMED, IDLE, MOVING, HOMING, FAULT };
 
-const char kIndexHtml[] PROGMEM = R"HTML(
-<!doctype html><html lang="vi"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BNO055 IMU Monitor</title><style>
-body{font-family:system-ui;background:#0f172a;color:#e2e8f0;margin:0;padding:20px}
-main{max-width:900px;margin:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
-.card{background:#1e293b;border-radius:12px;padding:16px}h1{font-size:24px}.value{font:600 18px monospace;line-height:1.7}
-button{background:#2563eb;color:white;border:0;border-radius:8px;padding:10px 16px}.bad{color:#f87171}.ok{color:#4ade80}
-</style></head><body><main><h1>BNO055 IMU Monitor</h1>
-<p id="status">Đang kết nối…</p><div class="grid">
-<section class="card"><h2>Quaternion</h2><div id="q" class="value"></div></section>
-<section class="card"><h2>Góc (độ)</h2><div id="angle" class="value"></div></section>
-<section class="card"><h2>Gyro (rad/s)</h2><div id="gyro" class="value"></div></section>
-<section class="card"><h2>Gia tốc (m/s²)</h2><div id="accel" class="value"></div></section>
-<section class="card"><h2>Calibration SYS/G/A/M</h2><div id="cal" class="value"></div></section>
-</div><p><button onclick="zero()">Đặt lại ZERO</button></p></main><script>
-const fmt=(a,n=3)=>a.map(v=>Number(v).toFixed(n)).join(' &nbsp; ');
-async function update(){try{const r=await fetch('/api/imu',{cache:'no-store'});const d=await r.json();
-status.textContent=d.ok?'BNO055 OK · mẫu '+d.sequence:'Không tìm thấy BNO055';status.className=d.ok?'ok':'bad';
-q.innerHTML='x y z w<br>'+fmt(d.q,5);angle.innerHTML='roll pitch yaw<br>'+fmt(d.angle);
-gyro.innerHTML='x y z<br>'+fmt(d.gyro);accel.innerHTML='x y z<br>'+fmt(d.accel);cal.textContent=d.cal.join(' / ');
-}catch(e){status.textContent='Mất kết nối web';status.className='bad'}}
-async function zero(){await fetch('/api/zero',{method:'POST'});await update()}setInterval(update,200);update();
-</script></body></html>)HTML";
+LiftMode liftMode = LiftMode::UNHOMED;
+bool liftHomed = false;
+long liftTargetSteps = 0;
+uint32_t liftHomeStartedMs = 0;
+uint32_t liftLastCommandMs = 0;
+uint32_t liftLastTelemetryMs = 0;
+char liftFault[28] = "NONE";
+char serialCommandBuffer[96];
+size_t serialCommandLength = 0;
 
-void normalize(float &w, float &x, float &y, float &z) {
-  const float norm = sqrtf(w * w + x * x + y * y + z * z);
-  if (!isfinite(norm) || norm < 1.0e-6F) {
-    w = 1.0F;
-    x = y = z = 0.0F;
-    return;
+enum class LiftCommandType : uint8_t { HOME, STOP, HEARTBEAT, SET_TARGET };
+
+struct LiftCommand {
+  LiftCommandType type;
+  float targetMetres;
+};
+
+struct LiftSnapshot {
+  LiftMode mode;
+  bool homed;
+  long positionSteps;
+  long targetSteps;
+  float speedStepsPerSecond;
+  bool lowerActive;
+  bool upperActive;
+  char fault[28];
+};
+
+QueueHandle_t liftCommandQueue = nullptr;
+LiftSnapshot sharedLift{
+  LiftMode::UNHOMED, false, 0, 0, 0.0f, false, false, "NONE"
+};
+portMUX_TYPE liftSnapshotMux = portMUX_INITIALIZER_UNLOCKED;
+
+void requestImuZeroFromSerial();
+
+long metresToSteps(float metres) {
+  return lroundf(metres * static_cast<float>(LIFT_STEPS_PER_M));
+}
+
+float stepsToMetres(long steps) {
+  return static_cast<float>(steps) / static_cast<float>(LIFT_STEPS_PER_M);
+}
+
+const char *liftModeName(LiftMode mode) {
+  switch (mode) {
+    case LiftMode::UNHOMED: return "UNHOMED";
+    case LiftMode::IDLE: return "IDLE";
+    case LiftMode::MOVING: return "MOVING";
+    case LiftMode::HOMING: return "HOMING";
+    case LiftMode::FAULT: return "FAULT";
   }
-  w /= norm;
-  x /= norm;
-  y /= norm;
-  z /= norm;
+  return "FAULT";
 }
 
-void setZero(const imu::Quaternion &q) {
-  float w = q.w();
-  float x = q.x();
-  float y = q.y();
-  float z = q.z();
-  normalize(w, x, y, z);
-  invQw = w;
-  invQx = -x;
-  invQy = -y;
-  invQz = -z;
-}
-
-void toEuler(float w, float x, float y, float z, float &roll, float &pitch,
-             float &yaw) {
-  roll = atan2f(2.0F * (w * x + y * z),
-                1.0F - 2.0F * (x * x + y * y));
-  const float sinPitch = 2.0F * (w * y - z * x);
-  pitch = fabsf(sinPitch) >= 1.0F ? copysignf(PI / 2.0F, sinPitch)
-                                  : asinf(sinPitch);
-  yaw = atan2f(2.0F * (w * z + x * y),
-               1.0F - 2.0F * (y * y + z * z));
-  constexpr float kRadToDeg = 180.0F / PI;
-  roll *= kRadToDeg;
-  pitch *= kRadToDeg;
-  yaw *= kRadToDeg;
-}
-
-ImuData snapshot() {
-  portENTER_CRITICAL(&imuMux);
-  const ImuData copy = imuData;
-  portEXIT_CRITICAL(&imuMux);
-  return copy;
-}
-
-void appendFloat(String &json, float value, unsigned int digits = 6) {
-  json += isfinite(value) ? String(value, digits) : "null";
-}
-
-void handleImu() {
-  const ImuData d = snapshot();
-  String json;
-  json.reserve(420);
-  json += "{\"ok\":";
-  json += d.sensor_ok ? "true" : "false";
-  json += ",\"sequence\":" + String(d.sequence);
-  json += ",\"age_ms\":" + String(millis() - d.sample_ms);
-  json += ",\"q\":[";
-  appendFloat(json, d.qx); json += ','; appendFloat(json, d.qy); json += ',';
-  appendFloat(json, d.qz); json += ','; appendFloat(json, d.qw); json += ']';
-  json += ",\"angle\":[";
-  appendFloat(json, d.roll, 3); json += ','; appendFloat(json, d.pitch, 3);
-  json += ','; appendFloat(json, d.yaw, 3); json += ']';
-  json += ",\"gyro\":[";
-  appendFloat(json, d.gx); json += ','; appendFloat(json, d.gy); json += ',';
-  appendFloat(json, d.gz); json += ']';
-  json += ",\"accel\":[";
-  appendFloat(json, d.ax); json += ','; appendFloat(json, d.ay); json += ',';
-  appendFloat(json, d.az); json += ']';
-  json += ",\"cal\":[" + String(d.cal_system) + ',' + String(d.cal_gyro) +
-          ',' + String(d.cal_accel) + ',' + String(d.cal_mag) + "]}";
-  server.sendHeader("Cache-Control", "no-store");
-  server.send(200, "application/json; charset=utf-8", json);
-}
-
-void handleZero() {
-  if (!snapshot().sensor_ok) {
-    server.send(503, "text/plain", "BNO055 not ready");
-    return;
-  }
-  portENTER_CRITICAL(&commandMux);
-  zeroRequested = true;
-  portEXIT_CRITICAL(&commandMux);
-  server.send(202, "text/plain", "ZERO requested");
-}
-
-bool takeZeroRequest() {
-  portENTER_CRITICAL(&commandMux);
-  const bool requested = zeroRequested;
-  zeroRequested = false;
-  portEXIT_CRITICAL(&commandMux);
-  return requested;
-}
-
-bool initializeSensor() {
-  if (!bno.begin()) {
+bool enqueueLiftCommand(LiftCommandType type, float targetMetres = 0.0f) {
+  const LiftCommand command{type, targetMetres};
+  if (liftCommandQueue == nullptr ||
+      xQueueSend(liftCommandQueue, &command, 0) != pdTRUE) {
+    Serial.println("EVENT,LIFT_REJECTED,COMMAND_QUEUE_FULL");
     return false;
   }
-  bno.setExtCrystalUse(true);
-  delay(1000);
-  setZero(bno.getQuat());
   return true;
 }
 
-void publishSerial(const ImuData &d) {
-  // Tagged protocol keeps boot/debug text distinguishable from sensor data:
-  // IMU,version,sequence,sample_ms,qx,qy,qz,qw,gx,gy,gz,ax,ay,az,cal...
-  Serial.printf(
-      "IMU,%u,%lu,%lu,%.7f,%.7f,%.7f,%.7f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u,%u\n",
-      kProtocolVersion, static_cast<unsigned long>(d.sequence),
-      static_cast<unsigned long>(d.sample_ms), d.qx, d.qy, d.qz, d.qw,
-      d.gx, d.gy, d.gz, d.ax, d.ay, d.az, d.cal_system, d.cal_gyro,
-      d.cal_accel, d.cal_mag);
+void updateLimit(DebouncedLimit &input, uint32_t nowMs) {
+  const bool raw = digitalRead(input.pin) == LIMIT_ACTIVE_LEVEL;
+  if (raw != input.rawActive) {
+    input.rawActive = raw;
+    input.changedAtMs = nowMs;
+  }
+  if (input.active != input.rawActive && nowMs - input.changedAtMs >= LIMIT_DEBOUNCE_MS) {
+    input.active = input.rawActive;
+  }
 }
 
-void imuTask(void *) {
-  TickType_t lastWake = xTaskGetTickCount();
-  uint32_t lastRetryMs = 0;
-  for (;;) {
-    if (!snapshot().sensor_ok) {
-      const uint32_t now = millis();
-      if (now - lastRetryMs >= kRetryPeriodMs) {
-        lastRetryMs = now;
-        const bool ok = initializeSensor();
-        portENTER_CRITICAL(&imuMux);
-        imuData.sensor_ok = ok;
-        portEXIT_CRITICAL(&imuMux);
-        Serial.println(ok ? "STATUS:BNO055_READY" : "STATUS:BNO055_NOT_FOUND");
+void stopLift(LiftMode nextMode) {
+  liftTargetSteps = liftStepper.currentPosition();
+  liftStepper.moveTo(liftTargetSteps);
+  liftStepper.setSpeed(0.0f);
+  liftMode = nextMode;
+}
+
+void setLiftFault(const char *fault) {
+  stopLift(LiftMode::FAULT);
+  liftHomed = false;
+  snprintf(liftFault, sizeof(liftFault), "%s", fault);
+  Serial.printf("EVENT,LIFT_FAULT,%s\n", liftFault);
+}
+
+void acceptLowerHome() {
+  liftStepper.setCurrentPosition(0);
+  liftTargetSteps = 0;
+  liftStepper.moveTo(0);
+  liftHomed = true;
+  liftMode = LiftMode::IDLE;
+  snprintf(liftFault, sizeof(liftFault), "NONE");
+  Serial.println("EVENT,LIFT_HOME_COMPLETE");
+}
+
+void startLiftHome(uint32_t nowMs) {
+  if (liftMode == LiftMode::FAULT) {
+    if (lowerLimit.active && upperLimit.active) {
+      Serial.printf("EVENT,LIFT_REJECTED,FAULT_%s\n", liftFault);
+      return;
+    }
+    snprintf(liftFault, sizeof(liftFault), "NONE");
+    liftMode = LiftMode::UNHOMED;
+  }
+  liftLastCommandMs = nowMs;
+  if (lowerLimit.active) {
+    acceptLowerHome();
+    return;
+  }
+  liftHomed = false;
+  liftHomeStartedMs = nowMs;
+  liftMode = LiftMode::HOMING;
+  liftStepper.setSpeed(-metresToSteps(LIFT_HOME_SPEED_M_S));
+  Serial.println("EVENT,LIFT_HOME_STARTED");
+}
+
+void setLiftTarget(float targetMetres, uint32_t nowMs) {
+  if (!isfinite(targetMetres) || targetMetres < 0.0f ||
+      targetMetres > LIFT_MAX_POSITION_M) {
+    Serial.println("EVENT,LIFT_REJECTED,RANGE");
+    return;
+  }
+  if (!liftHomed || liftMode == LiftMode::HOMING || liftMode == LiftMode::FAULT) {
+    Serial.println("EVENT,LIFT_REJECTED,NOT_READY");
+    return;
+  }
+  liftLastCommandMs = nowMs;
+  liftTargetSteps = metresToSteps(targetMetres);
+  liftStepper.moveTo(liftTargetSteps);
+  liftMode = liftStepper.distanceToGo() == 0 ? LiftMode::IDLE : LiftMode::MOVING;
+}
+
+void handleSerialCommand(char *line, uint32_t nowMs) {
+  (void)nowMs;
+  if (strcmp(line, "LIFT,HOME") == 0) {
+    enqueueLiftCommand(LiftCommandType::HOME);
+    return;
+  }
+  if (strcmp(line, "LIFT,STOP") == 0) {
+    enqueueLiftCommand(LiftCommandType::STOP);
+    return;
+  }
+  if (strcmp(line, "LIFT,HB") == 0) {
+    enqueueLiftCommand(LiftCommandType::HEARTBEAT);
+    return;
+  }
+  if (strncmp(line, "LIFT,SET,", 9) == 0) {
+    char *end = nullptr;
+    const float target = strtof(line + 9, &end);
+    if (end == line + 9 || *end != '\0') {
+      Serial.println("EVENT,LIFT_REJECTED,BAD_NUMBER");
+      return;
+    }
+    enqueueLiftCommand(LiftCommandType::SET_TARGET, target);
+    return;
+  }
+  if (strcmp(line, "Z") == 0 || strcmp(line, "z") == 0) {
+    requestImuZeroFromSerial();
+  }
+}
+
+void processLiftCommands(uint32_t nowMs) {
+  LiftCommand command;
+  while (xQueueReceive(liftCommandQueue, &command, 0) == pdTRUE) {
+    switch (command.type) {
+      case LiftCommandType::HOME:
+        startLiftHome(nowMs);
+        break;
+      case LiftCommandType::STOP:
+        stopLift(liftHomed ? LiftMode::IDLE : LiftMode::UNHOMED);
+        liftLastCommandMs = nowMs;
+        break;
+      case LiftCommandType::HEARTBEAT:
+        liftLastCommandMs = nowMs;
+        break;
+      case LiftCommandType::SET_TARGET:
+        setLiftTarget(command.targetMetres, nowMs);
+        break;
+    }
+  }
+}
+
+void readSerialCommands(uint32_t nowMs) {
+  while (Serial.available() > 0) {
+    const char value = static_cast<char>(Serial.read());
+    if (value == '\n' || value == '\r') {
+      if (serialCommandLength > 0) {
+        serialCommandBuffer[serialCommandLength] = '\0';
+        handleSerialCommand(serialCommandBuffer, nowMs);
+        serialCommandLength = 0;
       }
-      vTaskDelay(pdMS_TO_TICKS(100));
-      lastWake = xTaskGetTickCount();
+    } else if (serialCommandLength + 1 < sizeof(serialCommandBuffer)) {
+      serialCommandBuffer[serialCommandLength++] = value;
+    } else {
+      serialCommandLength = 0;
+      Serial.println("EVENT,LIFT_REJECTED,LINE_TOO_LONG");
+    }
+  }
+}
+
+void updateLift(uint32_t nowMs) {
+  updateLimit(lowerLimit, nowMs);
+  updateLimit(upperLimit, nowMs);
+
+  if (lowerLimit.active && upperLimit.active) {
+    if (liftMode != LiftMode::FAULT) setLiftFault("BOTH_LIMITS");
+    return;
+  }
+
+  // Phep thu HOME phai an toan ngay ca khi DIR vat ly bi nguoc: bat ky cong
+  // tac nao duoc cham trong luc HOME deu dung xung. Chi cong tac day tao moc 0;
+  // cong tac dinh tao fault de khong the bi hieu nham la HOME thanh cong.
+  if (liftMode == LiftMode::HOMING && upperLimit.active) {
+    setLiftFault("HOME_HIT_UPPER");
+    return;
+  }
+
+  // Chạm đáy luôn là mốc home thật. Khi đang nâng, vẫn cho phép
+  // động cơ đi ra khỏi công tắc; chiều hạ bị chặn ngay lập tức.
+  if (lowerLimit.active) {
+    const bool movingUp = liftMode == LiftMode::MOVING && liftTargetSteps > 0;
+    if (liftMode == LiftMode::HOMING || !movingUp) {
+      if (!liftHomed || liftMode != LiftMode::IDLE || liftStepper.currentPosition() != 0) {
+        acceptLowerHome();
+      }
+    } else if (!liftHomed) {
+      liftStepper.setCurrentPosition(0);
+      liftHomed = true;
+    }
+  }
+
+  if (upperLimit.active && liftMode == LiftMode::MOVING &&
+      liftTargetSteps > liftStepper.currentPosition()) {
+    liftStepper.setCurrentPosition(metresToSteps(LIFT_MAX_POSITION_M));
+    stopLift(LiftMode::IDLE);
+  }
+
+  if ((liftMode == LiftMode::MOVING || liftMode == LiftMode::HOMING) &&
+      nowMs - liftLastCommandMs > LIFT_COMMAND_TIMEOUT_MS) {
+    stopLift(liftHomed ? LiftMode::IDLE : LiftMode::UNHOMED);
+    Serial.println("EVENT,LIFT_STOPPED,COMM_TIMEOUT");
+    return;
+  }
+
+  if (liftMode == LiftMode::HOMING) {
+    if (nowMs - liftHomeStartedMs > LIFT_HOME_TIMEOUT_MS) {
+      setLiftFault("HOME_TIMEOUT");
+      return;
+    }
+    liftStepper.setSpeed(-metresToSteps(LIFT_HOME_SPEED_M_S));
+    liftStepper.runSpeed();
+  } else if (liftMode == LiftMode::MOVING) {
+    if (!liftStepper.run()) liftMode = LiftMode::IDLE;
+  }
+}
+
+void updateLiftSnapshot() {
+  LiftSnapshot snapshot;
+  snapshot.mode = liftMode;
+  snapshot.homed = liftHomed;
+  snapshot.positionSteps = liftStepper.currentPosition();
+  snapshot.targetSteps = liftTargetSteps;
+  snapshot.speedStepsPerSecond = liftStepper.speed();
+  snapshot.lowerActive = lowerLimit.active;
+  snapshot.upperActive = upperLimit.active;
+  snprintf(snapshot.fault, sizeof(snapshot.fault), "%s", liftFault);
+  portENTER_CRITICAL(&liftSnapshotMux);
+  sharedLift = snapshot;
+  portEXIT_CRITICAL(&liftSnapshotMux);
+}
+
+LiftSnapshot getLiftSnapshot() {
+  LiftSnapshot snapshot;
+  portENTER_CRITICAL(&liftSnapshotMux);
+  snapshot = sharedLift;
+  portEXIT_CRITICAL(&liftSnapshotMux);
+  return snapshot;
+}
+
+void publishLiftTelemetry(uint32_t nowMs) {
+  if (nowMs - liftLastTelemetryMs < LIFT_TELEMETRY_INTERVAL_MS) return;
+  liftLastTelemetryMs = nowMs;
+  const LiftSnapshot snapshot = getLiftSnapshot();
+  Serial.printf(
+    "LIFT,1,%lu,%s,%u,%.5f,%.5f,%.5f,%u,%u,%s\n",
+    static_cast<unsigned long>(nowMs), liftModeName(snapshot.mode),
+    snapshot.homed ? 1U : 0U, stepsToMetres(snapshot.positionSteps),
+    stepsToMetres(snapshot.targetSteps),
+    snapshot.speedStepsPerSecond / static_cast<float>(LIFT_STEPS_PER_M),
+    snapshot.lowerActive ? 1U : 0U, snapshot.upperActive ? 1U : 0U,
+    snapshot.fault);
+}
+
+void TaskLift(void *pvParameters) {
+  (void)pvParameters;
+  uint32_t lastSnapshotMs = 0;
+  for (;;) {
+    const uint32_t nowMs = millis();
+    processLiftCommands(nowMs);
+    updateLift(nowMs);
+    if (nowMs - lastSnapshotMs >= 5) {
+      lastSnapshotMs = nowMs;
+      updateLiftSnapshot();
+    }
+    // Giống task STEP của firmware Web đã chạy được: không chèn
+    // delay cố định và luôn nhường cho scheduler sau mỗi lần run().
+    taskYIELD();
+  }
+}
+
+bool bnoAvailable = false;
+
+// ========================================================
+// QUATERNION OFFSET
+// Q_relative = inverse(Q_offset) × Q_current
+// ========================================================
+float inv_qw = 1.0f;
+float inv_qx = 0.0f;
+float inv_qy = 0.0f;
+float inv_qz = 0.0f;
+
+// ========================================================
+// DỮ LIỆU IMU DÙNG CHUNG GIỮA HAI CORE
+// ========================================================
+struct IMUData {
+  bool sensorOK;
+
+  // Quaternion tương đối
+  float qx;
+  float qy;
+  float qz;
+  float qw;
+
+  // Góc Euler, đơn vị độ
+  float roll;
+  float pitch;
+  float yaw;
+
+  // Gia tốc, đơn vị m/s²
+  float ax;
+  float ay;
+  float az;
+
+  // Vận tốc góc, đơn vị rad/s
+  float gx;
+  float gy;
+  float gz;
+
+  // Calibration từ 0 đến 3
+  uint8_t calibSystem;
+  uint8_t calibGyro;
+  uint8_t calibAccel;
+  uint8_t calibMag;
+
+  uint32_t sampleCount;
+  uint32_t lastUpdateMs;
+};
+
+IMUData sharedIMU = {
+  false,
+  0.0f, 0.0f, 0.0f, 1.0f,
+  0.0f, 0.0f, 0.0f,
+  0.0f, 0.0f, 0.0f,
+  0.0f, 0.0f, 0.0f,
+  0, 0, 0, 0,
+  0,
+  0
+};
+
+portMUX_TYPE imuMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Cờ yêu cầu đặt lại zero từ Serial
+bool zeroRequested = false;
+portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
+
+void normalizeQuaternion(
+  float &qw,
+  float &qx,
+  float &qy,
+  float &qz) {
+  float magnitude = sqrtf(
+    qw * qw + qx * qx + qy * qy + qz * qz);
+
+  if (magnitude < 0.000001f) {
+    qw = 1.0f;
+    qx = 0.0f;
+    qy = 0.0f;
+    qz = 0.0f;
+    return;
+  }
+
+  qw /= magnitude;
+  qx /= magnitude;
+  qy /= magnitude;
+  qz /= magnitude;
+}
+
+// ========================================================
+// ĐẶT QUATERNION HIỆN TẠI LÀM OFFSET
+// ========================================================
+void setQuaternionOffset(
+  const imu::Quaternion &quaternion) {
+  float qw = quaternion.w();
+  float qx = quaternion.x();
+  float qy = quaternion.y();
+  float qz = quaternion.z();
+
+  normalizeQuaternion(
+    qw,
+    qx,
+    qy,
+    qz);
+
+  // Nghịch đảo của quaternion đơn vị
+  inv_qw = qw;
+  inv_qx = -qx;
+  inv_qy = -qy;
+  inv_qz = -qz;
+}
+
+// Lấy trung bình quaternion sau giai đoạn ổn định. Quaternion q và -q biểu
+// diễn cùng một tư thế, vì vậy các mẫu được đưa về cùng bán cầu trước khi cộng.
+// Nhờ đó zero không phụ thuộc vào một mẫu tức thời bị nhiễu.
+bool setAveragedQuaternionOffset() {
+  float sumW = 0.0f;
+  float sumX = 0.0f;
+  float sumY = 0.0f;
+  float sumZ = 0.0f;
+  float referenceW = 1.0f;
+  float referenceX = 0.0f;
+  float referenceY = 0.0f;
+  float referenceZ = 0.0f;
+  int validSamples = 0;
+
+  for (int sample = 0; sample < ZERO_SAMPLE_COUNT; ++sample) {
+    const imu::Quaternion quaternion = bno.getQuat();
+    float qw = quaternion.w();
+    float qx = quaternion.x();
+    float qy = quaternion.y();
+    float qz = quaternion.z();
+    const float magnitude = sqrtf(qw * qw + qx * qx + qy * qy + qz * qz);
+
+    if (isfinite(magnitude) && magnitude > 0.5f) {
+      qw /= magnitude;
+      qx /= magnitude;
+      qy /= magnitude;
+      qz /= magnitude;
+
+      if (validSamples == 0) {
+        referenceW = qw;
+        referenceX = qx;
+        referenceY = qy;
+        referenceZ = qz;
+      } else {
+        const float dot = qw * referenceW + qx * referenceX +
+                          qy * referenceY + qz * referenceZ;
+        if (dot < 0.0f) {
+          qw = -qw;
+          qx = -qx;
+          qy = -qy;
+          qz = -qz;
+        }
+      }
+
+      sumW += qw;
+      sumX += qx;
+      sumY += qy;
+      sumZ += qz;
+      ++validSamples;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(ZERO_SAMPLE_INTERVAL_MS));
+  }
+
+  if (validSamples < ZERO_SAMPLE_COUNT / 2) {
+    return false;
+  }
+
+  normalizeQuaternion(sumW, sumX, sumY, sumZ);
+  inv_qw = sumW;
+  inv_qx = -sumX;
+  inv_qy = -sumY;
+  inv_qz = -sumZ;
+  return true;
+}
+
+// ========================================================
+// KIỂM TRA YÊU CẦU ĐẶT LẠI ZERO
+// ========================================================
+bool takeZeroRequest() {
+  bool request;
+
+  portENTER_CRITICAL(&commandMux);
+
+  request = zeroRequested;
+  zeroRequested = false;
+
+  portEXIT_CRITICAL(&commandMux);
+
+  return request;
+}
+
+// ========================================================
+// CHUYỂN QUATERNION SANG ROLL, PITCH, YAW
+// ========================================================
+void quaternionToEuler(
+  float qw,
+  float qx,
+  float qy,
+  float qz,
+  float &roll,
+  float &pitch,
+  float &yaw) {
+  // Roll quanh trục X
+  float sinRoll =
+    2.0f * (qw * qx + qy * qz);
+
+  float cosRoll =
+    1.0f - 2.0f * (qx * qx + qy * qy);
+
+  roll =
+    atan2f(sinRoll, cosRoll);
+
+  // Pitch quanh trục Y
+  float sinPitch =
+    2.0f * (qw * qy - qz * qx);
+
+  sinPitch =
+    constrain(
+      sinPitch,
+      -1.0f,
+      1.0f);
+
+  pitch =
+    asinf(sinPitch);
+
+  // Yaw quanh trục Z
+  float sinYaw =
+    2.0f * (qw * qz + qx * qy);
+
+  float cosYaw =
+    1.0f - 2.0f * (qy * qy + qz * qz);
+
+  yaw =
+    atan2f(sinYaw, cosYaw);
+
+  const float RAD_TO_DEGREE =
+    180.0f / PI;
+
+  roll *= RAD_TO_DEGREE;
+  pitch *= RAD_TO_DEGREE;
+  yaw *= RAD_TO_DEGREE;
+}
+
+// ========================================================
+// SAO CHÉP DỮ LIỆU IMU AN TOÀN
+// ========================================================
+IMUData getIMUSnapshot() {
+  IMUData data;
+
+  portENTER_CRITICAL(&imuMux);
+  data = sharedIMU;
+  portEXIT_CRITICAL(&imuMux);
+
+  return data;
+}
+
+void requestImuZeroFromSerial() {
+  IMUData data = getIMUSnapshot();
+  if (data.sensorOK) {
+    portENTER_CRITICAL(&commandMux);
+    zeroRequested = true;
+    portEXIT_CRITICAL(&commandMux);
+    Serial.println("STATUS:ZERO_REQUESTED");
+  } else {
+    Serial.println("STATUS:BNO055_NOT_READY");
+  }
+}
+
+bool initializeBNO055() {
+  if (!bno.begin()) {
+    return false;
+  }
+
+  bno.setExtCrystalUse(true);
+
+  // Tổng thời gian khoảng 2 giây: chờ 1 giây, sau đó lấy trung bình 50 mẫu
+  // trong 1 giây. Xe chỉ cần đứng yên, không cần lắc/nghiêng.
+  Serial.println("STATUS:HOLD_STILL_2S_AUTO_ZERO");
+  vTaskDelay(
+    pdMS_TO_TICKS(ZERO_SETTLE_MS));
+
+  if (!setAveragedQuaternionOffset()) {
+    Serial.println("STATUS:AUTO_ZERO_SAMPLE_FAILED");
+    return false;
+  }
+
+  return true;
+}
+
+// ========================================================
+// TASK CORE 0:
+// ĐỌC BNO055 VÀ TÍNH TOÁN QUATERNION
+// ========================================================
+void TaskIMU(void *pvParameters) {
+  TickType_t lastWakeTime =
+    xTaskGetTickCount();
+
+  const TickType_t frequency =
+    pdMS_TO_TICKS(IMU_INTERVAL_MS);
+
+  unsigned long lastRetryTime = 0;
+  unsigned long lastCalibrationTime = 0;
+  uint8_t systemCalibration = 0;
+  uint8_t gyroCalibration = 0;
+  uint8_t accelCalibration = 0;
+  uint8_t magCalibration = 0;
+
+  for (;;) {
+    // Core 0 owns USB parsing/telemetry. Core 1 receives only compact commands
+    // through liftCommandQueue and therefore never blocks on Serial output.
+    const uint32_t serviceTimeMs = millis();
+    readSerialCommands(serviceTimeMs);
+    publishLiftTelemetry(serviceTimeMs);
+
+    // Nếu chưa tìm thấy cảm biến, thử lại mỗi 2 giây
+    if (!bnoAvailable) {
+      unsigned long currentTime =
+        millis();
+
+      if (
+        currentTime - lastRetryTime >= 2000) {
+        lastRetryTime = currentTime;
+
+        bnoAvailable =
+          initializeBNO055();
+
+        lastWakeTime = xTaskGetTickCount();
+
+        portENTER_CRITICAL(&imuMux);
+        sharedIMU.sensorOK =
+          bnoAvailable;
+        portEXIT_CRITICAL(&imuMux);
+      }
+
+      vTaskDelay(
+        pdMS_TO_TICKS(100));
+
       continue;
     }
 
-    const imu::Quaternion current = bno.getQuat();
+    // ----------------------------------------
+    // Đọc quaternion hiện tại
+    // ----------------------------------------
+    imu::Quaternion currentQuaternion =
+      bno.getQuat();
+
+    // ----------------------------------------
+    // Đặt lại zero nếu Serial yêu cầu
+    // ----------------------------------------
     if (takeZeroRequest()) {
-      setZero(current);
+      setQuaternionOffset(
+        currentQuaternion);
       Serial.println("STATUS:ZERO_APPLIED");
     }
-    float cw = current.w(), cx = current.x(), cy = current.y(), cz = current.z();
-    normalize(cw, cx, cy, cz);
-    float rw = invQw * cw - invQx * cx - invQy * cy - invQz * cz;
-    float rx = invQw * cx + invQx * cw + invQy * cz - invQz * cy;
-    float ry = invQw * cy - invQx * cz + invQy * cw + invQz * cx;
-    float rz = invQw * cz + invQx * cy - invQy * cx + invQz * cw;
-    normalize(rw, rx, ry, rz);
 
-    sensors_event_t accel;
-    sensors_event_t gyro;
-    bno.getEvent(&accel, Adafruit_BNO055::VECTOR_ACCELEROMETER);
-    bno.getEvent(&gyro, Adafruit_BNO055::VECTOR_GYROSCOPE);
-    ImuData next;
-    next.sensor_ok = true;
-    next.qx = rx; next.qy = ry; next.qz = rz; next.qw = rw;
-    next.gx = gyro.gyro.x; next.gy = gyro.gyro.y; next.gz = gyro.gyro.z;
-    next.ax = accel.acceleration.x; next.ay = accel.acceleration.y;
-    next.az = accel.acceleration.z;
-    toEuler(rw, rx, ry, rz, next.roll, next.pitch, next.yaw);
-    bno.getCalibration(&next.cal_system, &next.cal_gyro, &next.cal_accel,
-                       &next.cal_mag);
-    next.sample_ms = millis();
+    float current_qw =
+      currentQuaternion.w();
+
+    float current_qx =
+      currentQuaternion.x();
+
+    float current_qy =
+      currentQuaternion.y();
+
+    float current_qz =
+      currentQuaternion.z();
+
+    normalizeQuaternion(
+      current_qw,
+      current_qx,
+      current_qy,
+      current_qz);
+
+    // ----------------------------------------
+    // Q_relative =
+    //    inverse(Q_offset) × Q_current
+    // ----------------------------------------
+    float relative_qw =
+      inv_qw * current_qw - inv_qx * current_qx - inv_qy * current_qy - inv_qz * current_qz;
+
+    float relative_qx =
+      inv_qw * current_qx + inv_qx * current_qw + inv_qy * current_qz - inv_qz * current_qy;
+
+    float relative_qy =
+      inv_qw * current_qy - inv_qx * current_qz + inv_qy * current_qw + inv_qz * current_qx;
+
+    float relative_qz =
+      inv_qw * current_qz + inv_qx * current_qy - inv_qy * current_qx + inv_qz * current_qw;
+
+    normalizeQuaternion(
+      relative_qw,
+      relative_qx,
+      relative_qy,
+      relative_qz);
+
+    // IMU được lắp xoay 90 độ quanh Z: +Y của cảm biến hướng về phía trước
+    // xe. Đổi toàn bộ dữ liệu sang REP-103 của robot (+X trước, +Y trái,
+    // +Z lên): X_robot=Y_imu, Y_robot=-X_imu, Z_robot=Z_imu.
+    const float robot_qw = relative_qw;
+    const float robot_qx = relative_qy;
+    const float robot_qy = -relative_qx;
+    const float robot_qz = relative_qz;
+
+    // ----------------------------------------
+    // Chuyển sang Roll, Pitch, Yaw
+    // ----------------------------------------
+    float roll;
+    float pitch;
+    float yaw;
+
+    quaternionToEuler(
+      robot_qw,
+      robot_qx,
+      robot_qy,
+      robot_qz,
+      roll,
+      pitch,
+      yaw);
+
+    // ----------------------------------------
+    // Đọc gia tốc
+    // ----------------------------------------
+    sensors_event_t accelData;
+    sensors_event_t gyroData;
+
+    bno.getEvent(
+      &accelData,
+      Adafruit_BNO055::VECTOR_ACCELEROMETER);
+
+    bno.getEvent(
+      &gyroData,
+      Adafruit_BNO055::VECTOR_GYROSCOPE);
+
+    // ----------------------------------------
+    // Đọc calibration
+    // ----------------------------------------
+    const unsigned long calibrationTime = millis();
+    if (lastCalibrationTime == 0 ||
+        calibrationTime - lastCalibrationTime >= CALIBRATION_INTERVAL_MS) {
+      bno.getCalibration(
+        &systemCalibration,
+        &gyroCalibration,
+        &accelCalibration,
+        &magCalibration);
+      lastCalibrationTime = calibrationTime;
+    }
+
+    // ----------------------------------------
+    // Ghi dữ liệu dùng chung cho loop()
+    // ----------------------------------------
     portENTER_CRITICAL(&imuMux);
-    next.sequence = imuData.sequence + 1;
-    imuData = next;
+
+    sharedIMU.sensorOK = true;
+
+    sharedIMU.qx = robot_qx;
+    sharedIMU.qy = robot_qy;
+    sharedIMU.qz = robot_qz;
+    sharedIMU.qw = robot_qw;
+
+    sharedIMU.roll = roll;
+    sharedIMU.pitch = pitch;
+    sharedIMU.yaw = yaw;
+
+    sharedIMU.ax =
+      accelData.acceleration.y;
+
+    sharedIMU.ay =
+      -accelData.acceleration.x;
+
+    sharedIMU.az =
+      accelData.acceleration.z;
+
+    sharedIMU.gx = gyroData.gyro.y;
+    sharedIMU.gy = -gyroData.gyro.x;
+    sharedIMU.gz = gyroData.gyro.z;
+
+    sharedIMU.calibSystem =
+      systemCalibration;
+
+    sharedIMU.calibGyro =
+      gyroCalibration;
+
+    sharedIMU.calibAccel =
+      accelCalibration;
+
+    sharedIMU.calibMag =
+      magCalibration;
+
+    sharedIMU.sampleCount++;
+    sharedIMU.lastUpdateMs =
+      millis();
+
+    const IMUData output = sharedIMU;
+
     portEXIT_CRITICAL(&imuMux);
-    publishSerial(next);
-    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(kSamplePeriodMs));
+
+    // Protocol consumed by esp32_imu_bridge:
+    // IMU,version,sequence,millis,qx,qy,qz,qw,gx,gy,gz,ax,ay,az,S,G,A,M
+    Serial.printf(
+      "IMU,1,%lu,%lu,%.7f,%.7f,%.7f,%.7f,"
+      "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%u,%u,%u,%u\n",
+      static_cast<unsigned long>(output.sampleCount),
+      static_cast<unsigned long>(output.lastUpdateMs),
+      output.qx, output.qy, output.qz, output.qw,
+      output.gx, output.gy, output.gz,
+      output.ax, output.ay, output.az,
+      static_cast<unsigned int>(output.calibSystem),
+      static_cast<unsigned int>(output.calibGyro),
+      static_cast<unsigned int>(output.calibAccel),
+      static_cast<unsigned int>(output.calibMag));
+
+    // Nếu một giao dịch I2C bất thường làm task trễ nhiều chu kỳ, bắt đầu lịch
+    // mới thay vì chạy liên tiếp nhiều vòng để "bù" và tạo burst trên USB/ROS.
+    const TickType_t now = xTaskGetTickCount();
+    if (now - lastWakeTime > frequency * 2) {
+      lastWakeTime = now;
+    }
+
+    // Chu kỳ chính xác khoảng 20 ms (50 Hz).
+    vTaskDelayUntil(
+      &lastWakeTime,
+      frequency);
   }
 }
-
-void webTask(void *) {
-  for (;;) {
-    server.handleClient();
-    vTaskDelay(pdMS_TO_TICKS(2));
-  }
-}
-
-}  // namespace
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
-  Serial.println("BOOT,BNO055_IMU_MONITOR,1");
-  Wire.begin(kSdaPin, kSclPin);
+  delay(500);
+
+  // Khong tao AP/STA va khong chay Bluetooth. Goi ro rang WIFI_OFF de
+  // firmware van tat radio ke ca khi thu vien khac duoc them ve sau.
+  (void)esp_wifi_stop();
+  (void)esp_wifi_deinit();
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    (void)esp_bt_controller_disable();
+  }
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
+    (void)esp_bt_controller_deinit();
+  }
+
+  liftCommandQueue = xQueueCreate(16, sizeof(LiftCommand));
+  if (liftCommandQueue == nullptr) {
+    Serial.println("STATUS:LIFT_COMMAND_QUEUE_CREATE_FAILED");
+    while (true) delay(1000);
+  }
+
+  pinMode(LOWER_LIMIT_PIN, INPUT_PULLUP);
+  pinMode(UPPER_LIMIT_PIN, INPUT_PULLUP);
+  pinMode(LIFT_ENABLE_PIN, OUTPUT);
+  digitalWrite(LIFT_ENABLE_PIN, HIGH);
+  lowerLimit.rawActive = digitalRead(LOWER_LIMIT_PIN) == LIMIT_ACTIVE_LEVEL;
+  upperLimit.rawActive = digitalRead(UPPER_LIMIT_PIN) == LIMIT_ACTIVE_LEVEL;
+  lowerLimit.changedAtMs = millis();
+  upperLimit.changedAtMs = millis();
+
+  // Dao rieng DIR de toa do am cua HOME chay xuong. STEP va EN khong dao.
+  liftStepper.setPinsInverted(true, false, false);
+  liftStepper.setMaxSpeed(metresToSteps(LIFT_MAX_SPEED_M_S));
+  liftStepper.setAcceleration(metresToSteps(LIFT_ACCELERATION_M_S2));
+  updateLiftSnapshot();
+
+  Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(400000);
 
-  const bool ready = initializeSensor();
-  portENTER_CRITICAL(&imuMux);
-  imuData.sensor_ok = ready;
-  portEXIT_CRITICAL(&imuMux);
-  Serial.println(ready ? "STATUS:BNO055_READY" : "STATUS:BNO055_NOT_FOUND");
+  Serial.println("BOOT,BNO055_IMU_LIFT,1");
+  Serial.println("STATUS:INITIALIZING_BNO055");
+  bnoAvailable = initializeBNO055();
 
-  WiFi.mode(WIFI_AP);
-  WiFi.setSleep(false);
-  WiFi.softAPConfig(localIp, gateway, subnet);
-  WiFi.softAP(kApSsid, kApPassword, kApChannel, false, kMaxClients);
-  server.on("/", HTTP_GET,
-            []() { server.send_P(200, "text/html; charset=utf-8", kIndexHtml); });
-  server.on("/api/imu", HTTP_GET, handleImu);
-  server.on("/api/zero", HTTP_POST, handleZero);
-  server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
-  server.begin();
+  if (bnoAvailable) {
+    sharedIMU.sensorOK = true;
+    Serial.println("STATUS:BNO055_READY_ZERO_SET");
+  } else {
+    Serial.println("STATUS:BNO055_NOT_FOUND_RETRYING");
+  }
 
-  xTaskCreatePinnedToCore(webTask, "imu_web", 6144, nullptr, 1, nullptr, 0);
-  xTaskCreatePinnedToCore(imuTask, "imu_read", 6144, nullptr, 2, nullptr, 1);
+  Serial.println("STATUS:SEND_Z_TO_RESET_ZERO");
+
+  // IMU/USB trên Core 0; STEP có task chuyên dụng trên Core 1.
+  BaseType_t imuResult = xTaskCreatePinnedToCore(
+    TaskIMU, "IMU_Task", 6144, NULL, 2, NULL, 0);
+  BaseType_t liftResult = xTaskCreatePinnedToCore(
+    TaskLift, "Lift_Step_Task", 4096, NULL, 2, NULL, 1);
+
+  if (imuResult != pdPASS || liftResult != pdPASS) {
+    Serial.println("STATUS:CONTROL_TASK_CREATE_FAILED");
+    while (true) {
+      delay(1000);
+    }
+  }
 }
 
-void loop() { vTaskDelay(pdMS_TO_TICKS(1000)); }
+void loop() {
+  // Mọi công việc thời gian thực đã nằm trong hai task ghim core.
+  delay(1000);
+}

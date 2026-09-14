@@ -1,10 +1,17 @@
-# Raspberry Pi 5: ROS 2 control qua hai ESP32
+# Raspberry Pi 5: drive + IMU qua hai ESP32
 
-Backend `tai_robot_one/TaiRobotSerialSystem` là một `SystemInterface` duy nhất
-nhưng mở **hai cổng serial độc lập**:
+Phần cứng hiện tại dùng **hai cổng serial độc lập**:
 
 - `/dev/tai_drive`, 460800 baud: bốn bánh theo đúng thứ tự `FL, FR, RL, RR`;
-- `/dev/tai_lift`, 115200 baud: càng nâng với session/sequence riêng.
+- `/dev/tai_imu`, 115200 baud: BNO055 đã đổi trục về REP-103, tự zero sau
+  khoảng hai giây đứng yên, đồng thời điều khiển càng TB6600.
+- `/dev/tai_lidar`: SLAMTEC/RPLIDAR trên CP2102. Vì lidar và ESP32 drive có
+  cùng USB serial `0001`, hai tên này được cố định theo cổng USB vật lý.
+
+Backend `tai_robot_one/TaiRobotSerialSystem` điều khiển ESP32 drive. IMU bridge
+giữ độc quyền `/dev/tai_imu`, đọc IMU và gửi lệnh càng trên cùng một đường
+Serial. Vì vậy launch thật vẫn đặt `use_lift:=false`: tùy chọn này chỉ tắt lift
+backend cũ dùng cổng `/dev/tai_lift`, không tắt càng trong IMU bridge.
 
 Các interface ROS giữ nguyên giữa Gazebo và xe thật: bốn bánh nhận vận tốc
 rad/s, `lift_joint` nhận vị trí mét. Giới hạn cuối cùng ở cả ROS và firmware là
@@ -31,40 +38,33 @@ trong rules, hoặc thay USB-UART bằng loại có serial duy nhất. Kiểm tr
 chạy:
 
 ```bash
+readlink -f /dev/tai_lidar
 readlink -f /dev/tai_drive
-readlink -f /dev/tai_lift
-test "$(readlink -f /dev/tai_drive)" != "$(readlink -f /dev/tai_lift)"
+readlink -f /dev/tai_imu
+test "$(readlink -f /dev/tai_lidar)" != "$(readlink -f /dev/tai_drive)"
 ```
 
-Backend yêu cầu quyền truy cập độc quyền `TIOCEXCL` trên cả hai tty. Trước khi
-launch, dừng mọi chương trình cũ như `esp32_imu_bridge`, PlatformIO serial
-monitor hoặc terminal đang mở cùng cổng; có thể kiểm tra bằng:
+Drive backend và IMU bridge yêu cầu quyền truy cập độc quyền trên tty. Trước khi
+launch, dừng PlatformIO serial monitor hoặc node cũ đang mở cùng cổng; kiểm tra:
 
 ```bash
-fuser /dev/tai_drive /dev/tai_lift
+fuser /dev/tai_drive /dev/tai_imu
 ```
 
 ## Trình tự an toàn do backend thực hiện
 
-Khi configure, backend mở cả hai cổng, đưa base về `DISABLE` và tạo một session
-lift mới. Khi activate:
+Khi configure, backend mở cổng drive và đưa base về `DISABLE`. Khi activate:
 
 1. Base nhận một `CMD` bốn số 0; chỉ lỗi `COMMAND_TIMEOUT` được tự xóa. Lỗi
    software E-stop không được tự xóa.
-2. Lift chỉ tự xóa `COMM_TIMEOUT`. Mọi lỗi limit/homing khác buộc người vận hành
-   kiểm tra cơ khí và dây điện.
-3. Nếu lift chưa home, nó home về công tắc dưới. Nếu một endstop đang mở, càng
-   chỉ đi ra khỏi endstop tối đa 25 mm/5 giây để xác minh cạnh switch rồi mới
-   tiếp tục; switch không nhả hoặc switch trên xuất hiện khi đang tìm đáy sẽ
-   fault. Mọi lỗi hình học/endstop hủy trạng thái `homed` và buộc HOME lại.
-4. Base mới được `ENABLE`, sau đó lift mới được `ARM`.
-5. Chu kỳ điều khiển gửi frame mới liên tục. Không có lệnh cũ nào được lưu để
+2. Base được `ENABLE`; IMU bridge đồng thời đọc dữ liệu BNO055 ở 50 Hz.
+3. Chu kỳ điều khiển gửi frame mới liên tục. Không có lệnh cũ nào được lưu để
    phát lại sau khi rớt cáp.
 
-Trong trạng thái active, CRC/frame sai, telemetry quá 250 ms, session cũ, ESP32
-reset, serial disconnect, NACK/ERR hoặc fault đều làm hardware trả `ERROR`, gửi
-zero/`DISABLE` cho base và `STOP` cho lift. Watchdog 300 ms trong từng ESP32 vẫn
-là lớp bảo vệ cuối khi Raspberry Pi treo hẳn.
+Trong trạng thái active, CRC/frame sai, telemetry quá 250 ms, ESP32 reset,
+serial disconnect, NACK/ERR hoặc fault đều làm hardware trả `ERROR` và gửi
+zero/`DISABLE` cho base. Watchdog 300 ms trong ESP32 drive vẫn là lớp bảo vệ
+cuối khi Raspberry Pi treo hẳn.
 
 ## Build và chạy thật (chỉ sau khi mô phỏng đạt yêu cầu)
 
@@ -74,12 +74,16 @@ workspace, nâng cả bốn bánh khỏi sàn, tháo tải khỏi càng và gi�
 lý trước lần chạy đầu tiên.
 
 ```bash
-ros2 launch tai_robot_one real_hardware.launch.py
+cd ~/tai_robot_one/tai_robot_one_backup/ros2_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 launch tai_robot_one real_hardware.launch.py \
+  use_lift:=false use_rviz:=false \
+  drive_serial_port:=/dev/tai_drive imu_serial_port:=/dev/tai_imu
 ```
 
-Lệnh này có thể làm càng chuyển động do bước homing. Muốn chẩn đoán mà không cho
-home tự động, dùng `home_lift_on_activate:=false`; nếu lift chưa home thì
-activation sẽ thất bại an toàn, không ARM.
+Với `use_lift:=false`, backend không tìm `/dev/tai_lift`; càng thật vẫn nhận
+`/lift/home` và `/lift_controller/commands` qua bridge `/dev/tai_imu`.
 
 Kiểm tra controller và feedback:
 
@@ -91,20 +95,24 @@ ros2 topic echo /base_controller/odom
 ros2 topic echo /odom
 ```
 
-`/base_controller/odom` là odometry bánh xe thô. EKF trong
-`robot_localization` phát `/odom` và là node duy nhất phát TF
-`odom -> base_footprint`, tránh hai nguồn TF cạnh tranh nhau. Cấu hình EKF vẫn
-hoạt động chỉ với odometry bánh xe khi chưa có IMU; sau này có thể tự kết hợp
-`/imu/data` đã hiệu chuẩn và có covariance hợp lệ.
+`/base_controller/odom` là odometry bánh xe thô. EKF kết hợp vận tốc encoder,
+yaw và yaw-rate BNO055, phát `/odom` và là node duy nhất phát TF
+`odom -> base_footprint`. RViz đặt Fixed Frame là `odom` sẽ bám theo kết quả EKF.
 
 `cmd_vel_stamper` đổi `/cmd_vel` kiểu `Twist` từ teleop/Nav2 thành
 `/base_controller/cmd_vel` kiểu `TwistStamped`. Node này chỉ đóng dấu khi nhận
 lệnh mới và **không lặp lại lệnh**, vì lặp lại sẽ vô hiệu hóa ý nghĩa watchdog.
-Càng nhận lệnh vị trí từ controller:
+Trên laptop Ubuntu cùng mạng ROS, source ROS/workspace rồi chạy RViz và teleop:
 
 ```bash
-ros2 topic pub --once /lift_controller/commands std_msgs/msg/Float64MultiArray \
-  "{data: [0.10]}"
+export ROS_DOMAIN_ID=0
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+rviz2 -d ~/tai_robot_one_backup/ros2_ws/config/gazebo_robot.rviz
+
+# Terminal laptop khác; bắt đầu bằng tốc độ thấp.
+python3 ~/tai_robot_one_backup/ros2_ws/scripts/keyboard_teleop \
+  --ros-args -p linear_speed:=0.10 -p angular_speed:=0.35
 ```
 
 Software watchdog không thay thế E-stop/contactor cắt nguồn driver, mạch giới

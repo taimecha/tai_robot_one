@@ -14,8 +14,8 @@ ekf_filter_node:
     # ros2_control wheel odometry. Keep only planar velocity; wheel slip makes
     # integrating both its pose and velocity unnecessarily correlated.
     odom0: /base_controller/odom
-    odom0_config: [true,  true,  false,
-                   false, false, true,
+    odom0_config: [false, false, false,
+                   false, false, false,
                    true,  false, false,
                    false, false, true,
                    false, false, false]
@@ -23,13 +23,13 @@ ekf_filter_node:
     odom0_differential: false
     odom0_relative: false
 
-    # Use only IMU yaw rate.  Do not integrate linear acceleration into planar
-    # position: even the simulated sensor has a small stationary bias, and
-    # without an absolute lateral velocity/position measurement that bias made
-    # odom drift continuously while the Gazebo body was stopped.
+    # Fuse the BNO055 yaw (already zeroed by the ESP32 after startup) to bound
+    # heading drift, plus yaw rate for responsive turns.  Do not integrate
+    # linear acceleration into planar position: its small stationary bias would
+    # otherwise make odom drift while the vehicle is stopped.
     imu0: /imu
     imu0_config: [false, false, false,
-                  false, false, false,
+                  false, false, true,
                   false, false, false,
                   false, false, true,
                   false, false, false]

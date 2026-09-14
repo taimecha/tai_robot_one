@@ -243,17 +243,19 @@ FOV; đây không phải cảm biến an toàn. SLAM Toolbox vẫn lập occupan
 lidar `/scan`; camera scan chỉ được dùng như lớp vật cản động khi điều hướng.
 
 Chỉ sau khi các gate mô phỏng đạt mới dùng
-`real_hardware.launch.py` trên Raspberry Pi 5. Backend thật mở hai cổng độc lập
-`/dev/tai_drive` và `/dev/tai_lift`; hướng dẫn udev và trình tự homing nằm trong
+`real_hardware.launch.py` trên Raspberry Pi 5. Cấu hình hai ESP32 hiện tại mở
+`/dev/tai_drive` cho bốn bánh và `/dev/tai_imu` cho BNO055 + càng nâng. Đặt
+`use_lift:=false` để bridge dùng chung cổng IMU/càng, không phải để khóa càng.
+Hướng dẫn chạy Pi, RViz và teleop laptop nằm trong
 `docs/real_hardware.md`. Checklist nghiệm thu đầy đủ nằm ở
 `../docs/SIMULATION_TO_REAL_ROADMAP.md`.
 
 ## Project BNO055 và bridge GitHub
 
-Code web IMU được lưu thành project PlatformIO
-`esp32_firmware/Projects/bno055_imu_monitor`. Project vẫn có giao diện tại
-`http://192.168.5.1` và đồng thời phát quaternion, gyro, acceleration cùng mức
-calibration qua USB 115200 baud ở 25 Hz.
+Firmware production ESP32 số 2 nằm tại
+`esp32_firmware/Projects/bno055_imu_monitor`. Project không có Wi-Fi/Web/BLE;
+nó phát quaternion, gyro, acceleration, calibration và trạng thái càng qua USB
+115200 baud. IMU chạy 50 Hz, còn telemetry càng chạy 10 Hz.
 
 Package `ros2_ws/src/esp32_imu_bridge` đã được đối chiếu với repository
 `taimecha/agv_robot_pi5` rồi tích hợp thêm port parameter, reconnect, kiểm tra
@@ -261,11 +263,8 @@ NaN/quaternion/sequence và covariance. Với một ESP32 IMU standalone, chạy
 
 ```bash
 ros2 launch tai_robot_one imu_bridge.launch.py port:=/dev/tai_imu
-ros2 topic hz /imu/data
+ros2 topic hz /imu
 ```
 
-Đường này không được bật tự động trong `real_hardware.launch.py`, vì cấu hình
-robot production đã chốt hai ESP32 cho drive và lift. Không trỏ bridge vào
-`/dev/tai_drive` hoặc `/dev/tai_lift`. Muốn giữ đúng hai ESP32 mà vẫn dùng BNO055
-thật, cần ghép BNO055 vào ESP32 càng và mở rộng protocol lift/backend ở bước
-hardware sau khi mô phỏng đạt.
+IMU bridge hiện được bật tự động trong `real_hardware.launch.py`. Không trỏ
+bridge vào `/dev/tai_drive`; cổng đúng là `/dev/tai_imu`.

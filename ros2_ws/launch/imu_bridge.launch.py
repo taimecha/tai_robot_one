@@ -29,4 +29,10 @@ def generate_launch_description():
             output='screen',
             parameters=[default_config, {'port': port}],
         ),
+        Node(
+            package='tai_robot_one',
+            executable='imu_visualizer',
+            name='imu_visualizer',
+            output='screen',
+        ),
     ])

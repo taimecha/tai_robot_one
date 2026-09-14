@@ -1,42 +1,46 @@
-# BNO055 IMU monitor (bench project)
+# ESP32 số 2 — IMU BNO055 và càng nâng
 
-Project này được tạo từ code web monitor do người dùng cung cấp. Nó giữ giao
-diện Wi-Fi ở `http://192.168.5.1`, đồng thời bổ sung frame USB 115200 baud để
-`esp32_imu_bridge` có thể phát `sensor_msgs/Imu` đầy đủ hơn.
+Đây là firmware production duy nhất cho ESP32 số 2. File build chính:
+`src/main.cpp`.
 
-Bản 2.170 dòng do người dùng gửi được lưu nguyên nội dung (chỉ chuẩn hóa xuống
-dòng CRLF thành LF) tại `reference/original_web_monitor.cpp`. File build chính
-là `src/main.cpp`: bản này refactor giao diện gọn hơn và thêm gyro/protocol USB.
+Firmware không tạo Wi-Fi/Web server và không chạy Bluetooth. Giao tiếp duy
+nhất với Raspberry Pi 5 là USB Serial 115200 baud qua `/dev/tai_imu`.
 
-## Đấu dây
+## Chân kết nối
 
-| BNO055 | ESP32 |
-| --- | --- |
-| VIN | 3V3 (hoặc theo đúng breakout đang dùng) |
-| GND | GND |
-| SDA | GPIO 21 |
-| SCL | GPIO 22 |
+| Thiết bị | GPIO ESP32 |
+| --- | ---: |
+| BNO055 SDA | 21 |
+| BNO055 SCL | 22 |
+| TB6600 PUL- | 23 |
+| TB6600 DIR- | 4 |
+| TB6600 EN- | 19, giữ HIGH theo cấu hình đã thử |
+| Công tắc giới hạn chiều nâng | 33, active LOW |
+| Công tắc đáy/HOME | 32, active LOW |
 
-Địa chỉ mặc định là `0x28`; đổi `kBnoAddress` thành `0x29` nếu chân ADR của
-module yêu cầu. Web AP là `BNO055_IMU_MONITOR`, mật khẩu bench mặc định
-`12345678` và phải đổi nếu dùng ngoài bàn thử.
+TB6600 đặt 1/4 bước: 800 bước/vòng. Vít me T8x8 tương ứng 100000 bước/m.
+Tốc độ tối đa 1000 bước/s và gia tốc 500 bước/s².
 
-## USB protocol
+## Phân chia CPU
 
-Ở 25 Hz firmware phát:
+- Core 0: BNO055 50 Hz, tự đặt zero sau khoảng 2 giây, USB Serial và telemetry.
+- Core 1: AccelStepper và công tắc hành trình.
 
-```text
-IMU,1,sequence,sample_ms,qx,qy,qz,qw,gx,gy,gz,ax,ay,az,sys,gyr,acc,mag
+## Build và nạp
+
+```bash
+cd ~/tai_robot_one/tai_robot_one_backup/esp32_firmware/Projects/bno055_imu_monitor
+pio run
+pio run --target upload --upload-port /dev/tai_imu
 ```
 
-Gyro dùng rad/s, acceleration dùng m/s². Các dòng `BOOT,...` và `STATUS:...`
-chỉ là diagnostics; bridge bỏ qua chúng an toàn.
+Không mở PlatformIO monitor khi ROS bridge đang dùng `/dev/tai_imu`.
 
-## Giới hạn kiến trúc hiện tại
+## Protocol Serial
 
-Đây là project monitor độc lập để lưu và thử code IMU, không phải firmware
-production của ESP32 càng. Robot đã chốt hai ESP32 và hai cổng USB cho drive +
-lift; không nạp project này lên một trong hai board khi chạy robot. Nếu muốn
-BNO055 hoạt động trên robot mà không thêm ESP32 thứ ba, bước production đúng là
-nối BNO055 vào ESP32 càng và mở rộng protocol lift/backend `ros2_control` để
-dùng chung `/dev/tai_lift`.
+- `IMU,1,...`: quaternion, gyro, acceleration và calibration.
+- `LIFT,HOME`: chạy xuống công tắc đáy và đặt vị trí 0.
+- `LIFT,SET,0.02000`: đặt chiều cao tuyệt đối theo mét.
+- `LIFT,STOP`: dừng phát xung.
+- `LIFT,HB`: heartbeat khi HOME.
+- `LIFT,1,...`: phản hồi vị trí, tốc độ và công tắc để RViz bám càng thật.

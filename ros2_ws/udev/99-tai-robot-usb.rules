@@ -1,0 +1,23 @@
+# TAI Robot One - stable USB serial names.
+#
+# The lidar and ESP32 number 1 both expose the same CP2102 VID:PID and the
+# same bogus serial "0001". They therefore MUST be distinguished by the Pi 5
+# physical USB port (ID_PATH). Keep each cable in the port recorded below.
+
+# SLAMTEC/RPLIDAR CP2102 - Pi xHCI controller 1, physical port 1.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", \
+  ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+  ENV{ID_PATH}=="platform-xhci-hcd.1-usb-0:1:1.0", \
+  SYMLINK+="tai_lidar", MODE="0660", GROUP="dialout"
+
+# ESP32 number 1, four-wheel controller - controller 1, physical port 2.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", \
+  ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+  ENV{ID_PATH}=="platform-xhci-hcd.1-usb-0:2:1.0", \
+  SYMLINK+="tai_drive", MODE="0660", GROUP="dialout"
+
+# ESP32 number 2, BNO055 + TB6600 - controller 0, physical port 2.
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", \
+  ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", \
+  ENV{ID_PATH}=="platform-xhci-hcd.0-usb-0:2:1.0", \
+  SYMLINK+="tai_imu", MODE="0660", GROUP="dialout"

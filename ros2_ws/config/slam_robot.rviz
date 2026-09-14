@@ -115,7 +115,7 @@ Visualization Manager:
       Enabled: true
       Name: IMU live axes and data
       Namespaces:
-        gazebo_imu: true
+        live_imu: true
       Queue Size: 10
       Topic:
         Depth: 5

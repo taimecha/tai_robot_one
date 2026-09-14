@@ -27,7 +27,8 @@
             <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
         </joint>
 
-        <!-- lidar_link is the optical scan plane, exactly z=0.835 m. -->
+        <!-- lidar_link is the optical scan plane. Its absolute height is set
+             by the selected temporary or final mounting joint. -->
         <link name="lidar_link">
             <visual name="a1m8_base_visual">
                 <!-- Bottom of the lidar sits on the common sensor plate. -->

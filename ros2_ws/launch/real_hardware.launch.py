@@ -29,16 +29,21 @@ def _start_after_success(action, process_name):
 
 def generate_launch_description():
     package_share = get_package_share_directory('tai_robot_one')
+    imu_package_share = get_package_share_directory('esp32_imu_bridge')
     xacro_file = os.path.join(
         package_share, 'description', 'robot.urdf.xacro')
     controllers_file = os.path.join(
         package_share, 'config', 'ros2_controllers_real.yaml')
     ekf_file = os.path.join(package_share, 'config', 'ekf.yaml')
+    imu_config = os.path.join(
+        imu_package_share, 'config', 'imu_bridge.yaml')
     rviz_config = os.path.join(
         package_share, 'config', 'gazebo_robot.rviz')
 
     drive_port = LaunchConfiguration('drive_serial_port')
     lift_port = LaunchConfiguration('lift_serial_port')
+    imu_port = LaunchConfiguration('imu_serial_port')
+    use_lift = LaunchConfiguration('use_lift')
     home_lift = LaunchConfiguration('home_lift_on_activate')
     use_rviz = LaunchConfiguration('use_rviz')
 
@@ -50,6 +55,7 @@ def generate_launch_description():
             ' controllers_file:=', controllers_file,
             ' drive_serial_port:=', drive_port,
             ' lift_serial_port:=', lift_port,
+            ' use_lift:=', use_lift,
             ' home_lift_on_activate:=', home_lift,
         ]),
         value_type=str,
@@ -94,6 +100,27 @@ def generate_launch_description():
         remappings=[('odometry/filtered', '/odom')],
     )
 
+    imu_bridge = Node(
+        package='esp32_imu_bridge',
+        executable='imu_node',
+        name='esp32_imu_bridge',
+        output='screen',
+        parameters=[imu_config, {
+            'port': imu_port,
+            'baud': 115200,
+            'frame_id': 'imu_link',
+            'topic': '/imu',
+        }],
+    )
+
+    imu_visualizer = Node(
+        package='tai_robot_one',
+        executable='imu_visualizer',
+        name='imu_visualizer',
+        output='screen',
+        parameters=[{'publish_rate': 20.0}],
+    )
+
     joint_state_broadcaster = Node(
         package='controller_manager',
         executable='spawner',
@@ -134,6 +161,7 @@ def generate_launch_description():
             '--service-call-timeout', '90',
             '--param-file', controllers_file,
         ],
+        condition=IfCondition(use_lift),
     )
 
     start_joint_state_broadcaster = TimerAction(
@@ -173,6 +201,16 @@ def generate_launch_description():
             default_value='/dev/tai_lift',
             description='Stable udev symlink for the lift ESP32'),
         DeclareLaunchArgument(
+            'imu_serial_port',
+            default_value='/dev/tai_imu',
+            description='Stable udev symlink for the BNO055 ESP32'),
+        DeclareLaunchArgument(
+            'use_lift',
+            default_value='false',
+            description=(
+                'Keep false for the combined IMU/lift ESP32: esp32_imu_bridge '
+                'owns /dev/tai_imu and publishes lift feedback')),
+        DeclareLaunchArgument(
             'home_lift_on_activate',
             default_value='true',
             description='Home the lift automatically before arming it'),
@@ -183,6 +221,8 @@ def generate_launch_description():
         robot_state_publisher,
         controller_manager,
         cmd_vel_stamper,
+        imu_bridge,
+        imu_visualizer,
         ekf,
         start_joint_state_broadcaster,
         start_base_controller,

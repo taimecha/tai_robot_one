@@ -18,12 +18,15 @@ controller_manager:
 base_controller:
   ros__parameters:
     use_sim_time: false
+    # The physical motor harness is mirrored relative to the joint labels in
+    # the visual model.  Group the electrically right motors as the kinematic
+    # left side (and vice versa) so positive angular.z is a physical left turn.
     left_wheel_names:
-      - front_left_wheel_joint
-      - rear_left_wheel_joint
-    right_wheel_names:
       - front_right_wheel_joint
       - rear_right_wheel_joint
+    right_wheel_names:
+      - front_left_wheel_joint
+      - rear_left_wheel_joint
 
     wheel_separation: 0.428
     wheel_radius: 0.0875

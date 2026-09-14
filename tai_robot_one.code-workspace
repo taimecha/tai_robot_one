@@ -5,12 +5,12 @@
             "path": "."
         },
         {
-            "name": "ESP32 - AMR firmware",
+            "name": "ESP32 số 1 - 4 bánh",
             "path": "esp32_firmware/Projects/amr_firmware"
         },
         {
-            "name": "ESP32 - Cang nang ha",
-            "path": "esp32_firmware/Projects/cang_nang_ha"
+            "name": "ESP32 số 2 - IMU + càng",
+            "path": "esp32_firmware/Projects/bno055_imu_monitor"
         }
     ],
     "settings": {}

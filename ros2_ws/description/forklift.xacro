@@ -30,7 +30,7 @@
     <xacro:property name="fork_ground_clearance" value="0.065"/>
 
     <!--
-      Lift drivetrain, synchronized with ESP32 Projects/cang_nang_ha:
+      Lift drivetrain, synchronized with ESP32 Projects/bno055_imu_monitor:
       - 1.8 degree stepper, >=0.7 N.m holding torque
       - direct-drive T8x8 lead screw (8 mm travel per revolution)
       - 50 mm/s maximum travel = 375 screw RPM

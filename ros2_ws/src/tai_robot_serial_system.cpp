@@ -476,6 +476,9 @@ public:
 
     drive_port_path_ = parameter("drive_serial_port", "/dev/tai_drive");
     lift_port_path_ = parameter("lift_serial_port", "/dev/tai_lift");
+    if (!parseBoolParameter(parameter("use_lift", "true"), use_lift_)) {
+      return failInit("use_lift must be true/false or 1/0");
+    }
     if (!parseUnsignedParameter(parameter("drive_baud", "460800"), drive_baud_) ||
       drive_baud_ != 460800)
     {
@@ -521,7 +524,7 @@ public:
       return failInit("max_lift_position_m must be positive and no greater than 0.520");
     }
 
-    if (drive_port_path_ == lift_port_path_) {
+    if (use_lift_ && drive_port_path_ == lift_port_path_) {
       return failInit("drive_serial_port and lift_serial_port must be different devices");
     }
     return validateJointContract(info);
@@ -535,27 +538,34 @@ public:
       RCLCPP_ERROR(owner_.get_logger(), "Base ESP32: %s", error.c_str());
       return hardware_interface::CallbackReturn::ERROR;
     }
-    if (!lift_port_.openPort(lift_port_path_, lift_baud_, error)) {
+    if (use_lift_ && !lift_port_.openPort(lift_port_path_, lift_baud_, error)) {
       RCLCPP_ERROR(owner_.get_logger(), "Lift ESP32: %s", error.c_str());
       drive_port_.closePort();
       return hardware_interface::CallbackReturn::ERROR;
     }
 
     setAllInterfacesToZero();
-    lift_session_ = generateSessionId();
+    lift_session_ = use_lift_ ? generateSessionId() : 0;
 
     // Opening either USB-UART may reset its ESP32. Retry only idempotent,
     // non-motion startup records while waiting for both firmwares to answer.
-    if (!establishBaseSafeState() || !establishLiftSession()) {
+    if (!establishBaseSafeState() || (use_lift_ && !establishLiftSession())) {
       safeStopNoWait();
       closePorts();
       return hardware_interface::CallbackReturn::ERROR;
     }
 
     configured_ = true;
-    RCLCPP_INFO(
-      owner_.get_logger(), "Connected base on %s and lift on %s; both are disarmed",
-      drive_port_path_.c_str(), lift_port_path_.c_str());
+    if (use_lift_) {
+      RCLCPP_INFO(
+        owner_.get_logger(), "Connected base on %s and lift on %s; both are disarmed",
+        drive_port_path_.c_str(), lift_port_path_.c_str());
+    } else {
+      RCLCPP_INFO(
+        owner_.get_logger(),
+        "Connected base on %s; combined IMU/lift bridge owns ESP32 number 2",
+        drive_port_path_.c_str());
+    }
     return hardware_interface::CallbackReturn::SUCCESS;
   }
 
@@ -569,7 +579,10 @@ public:
 
     // The base remains disabled throughout lift homing, so a long homing run
     // cannot expire the base motion watchdog.
-    if (!prepareBaseForEnable() || !prepareAndHomeLift() || !enableBase() || !armLift()) {
+    if (!prepareBaseForEnable() ||
+      (use_lift_ && !prepareAndHomeLift()) ||
+      !enableBase() || (use_lift_ && !armLift()))
+    {
       safeStopNoWait();
       return hardware_interface::CallbackReturn::ERROR;
     }
@@ -577,13 +590,16 @@ public:
     for (const char * joint : kWheelJointNames) {
       owner_.set_command(interfaceName(joint, hardware_interface::HW_IF_VELOCITY), 0.0);
     }
-    owner_.set_command(
-      interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION), lift_state_.position_m);
+    if (use_lift_) {
+      owner_.set_command(
+        interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION),
+        lift_state_.position_m);
+    }
     active_ = true;
     RCLCPP_INFO(
       owner_.get_logger(),
       "Serial hardware active: FL/FR/RL/RR capped at %.5f rad/s, lift at %.3f m",
-      max_wheel_speed_rad_s_, lift_state_.position_m);
+      max_wheel_speed_rad_s_, use_lift_ ? lift_state_.position_m : 0.0);
     return hardware_interface::CallbackReturn::SUCCESS;
   }
 
@@ -594,7 +610,7 @@ public:
     for (const char * joint : kWheelJointNames) {
       owner_.set_command(interfaceName(joint, hardware_interface::HW_IF_VELOCITY), 0.0);
     }
-    if (lift_state_.seen) {
+    if (use_lift_ && lift_state_.seen) {
       owner_.set_command(
         interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION), lift_state_.position_m);
     }
@@ -626,7 +642,8 @@ public:
       setFatal("base telemetry timeout");
       return communicationError();
     }
-    if (!lift_state_.seen || now - lift_state_.received_at > timeout) {
+    if (use_lift_ &&
+      (!lift_state_.seen || now - lift_state_.received_at > timeout)) {
       setFatal("lift telemetry timeout");
       return communicationError();
     }
@@ -643,11 +660,12 @@ public:
         setFatal("base firmware reports drive disabled while hardware is active");
         return communicationError();
       }
-      if (lift_state_.fault != "NONE") {
+      if (use_lift_ && lift_state_.fault != "NONE") {
         setFatal("lift fault=" + lift_state_.fault);
         return communicationError();
       }
-      if (!lift_state_.homed || !lift_state_.armed || lift_state_.session != lift_session_) {
+      if (use_lift_ &&
+        (!lift_state_.homed || !lift_state_.armed || lift_state_.session != lift_session_)) {
         setFatal("lift lost homed/armed session while hardware is active");
         return communicationError();
       }
@@ -661,10 +679,14 @@ public:
         interfaceName(kWheelJointNames[index], hardware_interface::HW_IF_VELOCITY),
         base_state_.velocity[index]);
     }
-    owner_.set_state(
-      interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION), lift_state_.position_m);
-    owner_.set_state(
-      interfaceName(kLiftJointName, hardware_interface::HW_IF_VELOCITY), lift_state_.velocity_m_s);
+    if (use_lift_) {
+      owner_.set_state(
+        interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION),
+        lift_state_.position_m);
+      owner_.set_state(
+        interfaceName(kLiftJointName, hardware_interface::HW_IF_VELOCITY),
+        lift_state_.velocity_m_s);
+    }
     return hardware_interface::return_type::OK;
   }
 
@@ -686,20 +708,24 @@ public:
         return hardware_interface::return_type::ERROR;
       }
     }
-    const double lift_command = owner_.get_command<double>(
-      interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION));
-    if (!std::isfinite(lift_command) || lift_command < -1.0e-6 ||
-      lift_command > max_lift_position_m_ + 1.0e-6)
-    {
-      setFatal("non-finite or out-of-range lift command");
-      safeStopNoWait();
-      return hardware_interface::return_type::ERROR;
+    double lift_command = 0.0;
+    if (use_lift_) {
+      lift_command = owner_.get_command<double>(
+        interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION));
+      if (!std::isfinite(lift_command) || lift_command < -1.0e-6 ||
+        lift_command > max_lift_position_m_ + 1.0e-6)
+      {
+        setFatal("non-finite or out-of-range lift command");
+        safeStopNoWait();
+        return hardware_interface::return_type::ERROR;
+      }
     }
 
     // Every update emits newly sequenced records. Nothing is queued for replay
     // after a disconnect; any write failure puts the component in ERROR.
     if (!sendBaseVelocity(wheel_commands) ||
-      !sendLiftSet(std::clamp(lift_command, 0.0, max_lift_position_m_)))
+      (use_lift_ &&
+      !sendLiftSet(std::clamp(lift_command, 0.0, max_lift_position_m_))))
     {
       safeStopNoWait();
       return communicationError();
@@ -731,8 +757,11 @@ private:
 
   bool validateJointContract(const hardware_interface::HardwareInfo & info)
   {
-    if (info.joints.size() != 5) {
-      return failInit("TaiRobotSerialSystem requires exactly four wheel joints and lift_joint");
+    const std::size_t expected_joint_count = use_lift_ ? 5U : 4U;
+    if (info.joints.size() != expected_joint_count) {
+      return failInit(use_lift_ ?
+        "TaiRobotSerialSystem requires exactly four wheel joints and lift_joint" :
+        "TaiRobotSerialSystem requires exactly four wheel joints when use_lift=false");
     }
     std::unordered_map<std::string, const hardware_interface::ComponentInfo *> joints;
     for (const auto & joint : info.joints) {
@@ -746,11 +775,13 @@ private:
         return failInit(std::string("invalid ros2_control interfaces for ") + name);
       }
     }
-    const auto lift = joints.find(kLiftJointName);
-    if (lift == joints.end() || !validateJointInterfaces(
-        *lift->second, hardware_interface::HW_IF_POSITION))
-    {
-      return failInit("invalid ros2_control interfaces for lift_joint");
+    if (use_lift_) {
+      const auto lift = joints.find(kLiftJointName);
+      if (lift == joints.end() || !validateJointInterfaces(
+          *lift->second, hardware_interface::HW_IF_POSITION))
+      {
+        return failInit("invalid ros2_control interfaces for lift_joint");
+      }
     }
     return true;
   }
@@ -780,9 +811,11 @@ private:
       owner_.set_state(interfaceName(joint, hardware_interface::HW_IF_VELOCITY), 0.0);
       owner_.set_command(interfaceName(joint, hardware_interface::HW_IF_VELOCITY), 0.0);
     }
-    owner_.set_state(interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION), 0.0);
-    owner_.set_state(interfaceName(kLiftJointName, hardware_interface::HW_IF_VELOCITY), 0.0);
-    owner_.set_command(interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION), 0.0);
+    if (use_lift_) {
+      owner_.set_state(interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION), 0.0);
+      owner_.set_state(interfaceName(kLiftJointName, hardware_interface::HW_IF_VELOCITY), 0.0);
+      owner_.set_command(interfaceName(kLiftJointName, hardware_interface::HW_IF_POSITION), 0.0);
+    }
   }
 
   void resetRuntimeState()
@@ -844,7 +877,7 @@ private:
 
   bool pumpBoth()
   {
-    return pumpBase() && pumpLift();
+    return pumpBase() && (!use_lift_ || pumpLift());
   }
 
   bool pumpBase()
@@ -1553,6 +1586,7 @@ private:
   unsigned int telemetry_timeout_ms_{250};
   unsigned int lift_home_timeout_ms_{70000};
   bool home_lift_on_activate_{true};
+  bool use_lift_{true};
   double max_wheel_speed_rad_s_{kDefaultMaxWheelSpeedRadS};
   double max_lift_position_m_{kDefaultMaxLiftPositionM};
 

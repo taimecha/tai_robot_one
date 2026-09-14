@@ -14,15 +14,13 @@ USB fields and telemetry always use this canonical order:
 
 | Index | Joint / field | Existing web command preserved | RPWM | LPWM | Encoder A | Encoder B |
 |---:|---|---|---:|---:|---:|---:|
-| 0 | `front_left` (`FL`) | `fl` | 27 | 14 | 18 | 19 |
-| 1 | `front_right` (`FR`) | `fr` | 32 | 33 | 23 | 4 |
-| 2 | `rear_left` (`RL`) | `bl` | 22 | 13 | 16 | 17 |
-| 3 | `rear_right` (`RR`) | `br` | 25 | 26 | 34 | 35 |
+| 0 | `front_left` (`FL`) | `fl` | 33 | 32 | 4 | 23 |
+| 1 | `front_right` (`FR`) | `fr` | 14 | 27 | 34 | 35 |
+| 2 | `rear_left` (`RL`) | `bl` | 25 | 26 | 19 | 18 |
+| 3 | `rear_right` (`RR`) | `br` | 13 | 22 | 16 | 17 |
 
-The former source mixed its string labels and comments, but the web handler
-actually routed `fr, fl, bl, br` to those four hardware rows in that order.
-The table above preserves that routing while renaming `BL/BR` to ROS's
-`rear_left/rear_right` convention.
+The table is copied directly from the supplied PID tuner and reordered from
+`FR, FL, BL, BR` into the ROS-facing `FL, FR, RL, RR` protocol order.
 
 `command_sign` and `encoder_sign` are explicit in `src/main.cpp`. They default
 to `+1` to preserve the old controller. Raise the chassis and verify each wheel
@@ -125,5 +123,5 @@ pio run
 
 The reusable PID implementation is the single file
 `../../Common/amr_drive_pid/src/pid.cpp`; its header contains only declarations
-and configuration types. The separate `amr_pid_tuner` project owns all HTTP and
-Wi-Fi bench-test code.
+and configuration types. Firmware production này chỉ giao tiếp USB Serial
+460800 baud qua `/dev/tai_drive`; Wi-Fi và Bluetooth luôn tắt.

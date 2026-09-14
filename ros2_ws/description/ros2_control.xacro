@@ -15,6 +15,7 @@
                     <param name="drive_baud">460800</param>
                     <param name="lift_serial_port">$(arg lift_serial_port)</param>
                     <param name="lift_baud">115200</param>
+                    <param name="use_lift">$(arg use_lift)</param>
                     <param name="startup_timeout_ms">$(arg serial_startup_timeout_ms)</param>
                     <param name="telemetry_timeout_ms">$(arg serial_telemetry_timeout_ms)</param>
                     <param name="lift_home_timeout_ms">$(arg lift_home_timeout_ms)</param>
@@ -70,25 +71,35 @@
                 <state_interface name="velocity"/>
             </joint>
 
-            <!-- Position is metres above the mechanical lower stop. -->
-            <joint name="lift_joint">
-                <xacro:if value="$(arg use_sim)">
+            <!-- Position is metres above the mechanical lower stop. In real
+                 mode with use_lift=false the combined IMU/lift bridge owns
+                 lift_joint and publishes its feedback on /joint_states. -->
+            <xacro:if value="$(arg use_sim)">
+                <joint name="lift_joint">
                     <command_interface name="effort">
                         <param name="min">${-lift_max_force}</param>
                         <param name="max">${lift_max_force}</param>
                     </command_interface>
+                    <state_interface name="position">
+                        <param name="initial_value">0.0</param>
+                    </state_interface>
+                    <state_interface name="velocity"/>
+                </joint>
+            </xacro:if>
+            <xacro:unless value="$(arg use_sim)">
+                <xacro:if value="$(arg use_lift)">
+                    <joint name="lift_joint">
+                        <command_interface name="position">
+                            <param name="min">0.0</param>
+                            <param name="max">${lift_travel}</param>
+                        </command_interface>
+                        <state_interface name="position">
+                            <param name="initial_value">0.0</param>
+                        </state_interface>
+                        <state_interface name="velocity"/>
+                    </joint>
                 </xacro:if>
-                <xacro:unless value="$(arg use_sim)">
-                    <command_interface name="position">
-                        <param name="min">0.0</param>
-                        <param name="max">${lift_travel}</param>
-                    </command_interface>
-                </xacro:unless>
-                <state_interface name="position">
-                    <param name="initial_value">0.0</param>
-                </state_interface>
-                <state_interface name="velocity"/>
-            </joint>
+            </xacro:unless>
         </ros2_control>
     </xacro:macro>
 

@@ -13,6 +13,7 @@
          symlinks are mandatory because ttyUSB numbering is not deterministic. -->
     <xacro:arg name="drive_serial_port" default="/dev/tai_drive"/>
     <xacro:arg name="lift_serial_port" default="/dev/tai_lift"/>
+    <xacro:arg name="use_lift" default="true"/>
     <xacro:arg name="home_lift_on_activate" default="true"/>
     <xacro:arg name="serial_startup_timeout_ms" default="3000"/>
     <xacro:arg name="serial_telemetry_timeout_ms" default="250"/>
