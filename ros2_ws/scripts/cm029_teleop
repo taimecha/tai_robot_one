@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+
+"""Fail-safe CM029 joystick teleoperation for the real robot."""
+
+import math
+import time
+
+from geometry_msgs.msg import Twist
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState, Joy
+from std_msgs.msg import Float64MultiArray
+
+
+class CM029Teleop(Node):
+    """Translate the verified Xbox-compatible mapping into robot commands."""
+
+    def __init__(self):
+        super().__init__('cm029_teleop')
+        self.declare_parameter('joy_topic', '/joy')
+        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        self.declare_parameter('lift_topic', '/lift_controller/commands')
+        self.declare_parameter('linear_speed', 0.5)
+        self.declare_parameter('angular_speed', 1.0)
+        self.declare_parameter('deadzone', 0.10)
+        self.declare_parameter('joy_timeout', 0.30)
+        self.declare_parameter('lift_speed', 0.05)
+        self.declare_parameter('publish_rate', 20.0)
+
+        self.joy_topic = str(self.get_parameter('joy_topic').value)
+        self.cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
+        self.lift_topic = str(self.get_parameter('lift_topic').value)
+        self.linear_speed = float(self.get_parameter('linear_speed').value)
+        self.angular_speed = float(self.get_parameter('angular_speed').value)
+        self.deadzone = float(self.get_parameter('deadzone').value)
+        self.joy_timeout = float(self.get_parameter('joy_timeout').value)
+        self.lift_speed = float(self.get_parameter('lift_speed').value)
+        self.publish_rate = float(self.get_parameter('publish_rate').value)
+        if not 0.0 <= self.deadzone < 1.0:
+            raise ValueError('deadzone must be in [0.0, 1.0)')
+        if min(self.linear_speed, self.angular_speed, self.joy_timeout,
+               self.lift_speed, self.publish_rate) <= 0.0:
+            raise ValueError('speed, timeout and rate parameters must be positive')
+
+        self.cmd_publisher = self.create_publisher(Twist, self.cmd_vel_topic, 10)
+        self.lift_publisher = self.create_publisher(
+            Float64MultiArray, self.lift_topic, 10)
+        self.create_subscription(
+            Joy, self.joy_topic, self.joy_callback, qos_profile_sensor_data)
+        self.create_subscription(
+            JointState, '/joint_states', self.joint_state_callback,
+            qos_profile_sensor_data)
+
+        self.armed = False
+        self.seen_joy = False
+        self.start_released = False
+        self.last_joy_time = None
+        self.axes = [0.0] * 8
+        self.buttons = [0] * 11
+        self.previous_buttons = [0] * 11
+        self.measured_lift = None
+        self.lift_target = None
+        self.lift_preset_target = None
+        self.last_tick = time.monotonic()
+        self.conflict_warning_time = 0.0
+        self.create_timer(1.0 / self.publish_rate, self.control_tick)
+        self.get_logger().warning(
+            'CM029 control is LOCKED. Release Start, then press it once to arm. '
+            'Button B is only a software stop, not a physical E-stop.')
+
+    @staticmethod
+    def _pressed(buttons, index):
+        return index < len(buttons) and buttons[index] != 0
+
+    @staticmethod
+    def _axis(axes, index):
+        if index >= len(axes) or not math.isfinite(float(axes[index])):
+            return 0.0
+        return float(axes[index])
+
+    def _shape_axis(self, value):
+        if abs(value) <= self.deadzone:
+            return 0.0
+        magnitude = (abs(value) - self.deadzone) / (1.0 - self.deadzone)
+        return math.copysign(min(1.0, magnitude), value)
+
+    def joint_state_callback(self, message):
+        try:
+            index = message.name.index('lift_joint')
+        except ValueError:
+            return
+        if index >= len(message.position):
+            return
+        position = float(message.position[index])
+        if math.isfinite(position):
+            self.measured_lift = min(0.52, max(0.0, position))
+            if self.lift_target is None:
+                self.lift_target = self.measured_lift
+
+    def _foreign_cmd_vel_publishers(self):
+        return [
+            info for info in self.get_publishers_info_by_topic(self.cmd_vel_topic)
+            if not (info.node_name == self.get_name() and
+                    info.node_namespace == self.get_namespace())
+        ]
+
+    def _log_conflict(self, publishers):
+        now = time.monotonic()
+        if now - self.conflict_warning_time < 2.0:
+            return
+        self.conflict_warning_time = now
+        names = ', '.join(
+            f'{info.node_namespace.rstrip("/")}/{info.node_name}'
+            for info in publishers)
+        self.get_logger().error(
+            f'CM029 remains LOCKED: other {self.cmd_vel_topic} publisher(s): '
+            f'{names}. Stop phone, keyboard and Nav2 command sources first.')
+
+    def joy_callback(self, message):
+        now = time.monotonic()
+        reconnecting = (
+            self.last_joy_time is None or
+            now - self.last_joy_time > self.joy_timeout)
+        self.last_joy_time = now
+        self.axes = list(message.axes)
+        self.buttons = list(message.buttons)
+        if not self.seen_joy or reconnecting:
+            self.seen_joy = True
+            self.armed = False
+            self.lift_preset_target = None
+            self.start_released = not self._pressed(self.buttons, 7)
+            self.previous_buttons = list(self.buttons)
+            self.publish_stop(hold_lift=True)
+            self.get_logger().warning(
+                'Joystick connected/reconnected; control remains LOCKED')
+            return
+
+        start = self._pressed(self.buttons, 7)
+        previous_start = self._pressed(self.previous_buttons, 7)
+        stop = self._pressed(self.buttons, 1)
+        if not start:
+            self.start_released = True
+        if stop:
+            self.lock('B software stop pressed')
+        elif start and not previous_start and self.start_released:
+            conflicts = self._foreign_cmd_vel_publishers()
+            if conflicts:
+                self._log_conflict(conflicts)
+            else:
+                self.armed = True
+                self.lift_target = self.measured_lift
+                self.lift_preset_target = None
+                self.get_logger().warning('CM029 control ARMED')
+        self.previous_buttons = list(self.buttons)
+
+    def publish_stop(self, hold_lift=False):
+        self.cmd_publisher.publish(Twist())
+        if hold_lift and self.measured_lift is not None:
+            self.lift_target = self.measured_lift
+            command = Float64MultiArray()
+            command.data = [self.measured_lift]
+            self.lift_publisher.publish(command)
+
+    def lock(self, reason):
+        was_armed = self.armed
+        self.armed = False
+        self.lift_preset_target = None
+        self.publish_stop(hold_lift=True)
+        if was_armed:
+            self.get_logger().warning(f'CM029 control LOCKED: {reason}')
+
+    def _update_lift(self, elapsed):
+        if self.measured_lift is None:
+            return
+        if self.lift_target is None:
+            self.lift_target = self.measured_lift
+        rb = self._pressed(self.buttons, 5)
+        lb = self._pressed(self.buttons, 4)
+        up = self._pressed(self.buttons, 3)
+        down = self._pressed(self.buttons, 0)
+        if rb:
+            self.lift_target = 0.52
+            self.lift_preset_target = self.lift_target
+        elif lb:
+            self.lift_target = 0.0
+            self.lift_preset_target = self.lift_target
+        elif up != down:
+            self.lift_preset_target = None
+            direction = 1.0 if up else -1.0
+            self.lift_target += direction * self.lift_speed * elapsed
+            self.lift_target = min(0.52, max(0.0, self.lift_target))
+        elif self.lift_preset_target is not None:
+            self.lift_target = self.lift_preset_target
+            if abs(self.measured_lift - self.lift_preset_target) <= 0.001:
+                self.lift_preset_target = None
+        else:
+            return
+        command = Float64MultiArray()
+        command.data = [self.lift_target]
+        self.lift_publisher.publish(command)
+
+    def control_tick(self):
+        now = time.monotonic()
+        elapsed = min(0.1, max(0.0, now - self.last_tick))
+        self.last_tick = now
+        if self.last_joy_time is None or now - self.last_joy_time > self.joy_timeout:
+            if self.armed:
+                self.lock('joystick watchdog timeout')
+            else:
+                self.publish_stop()
+            return
+        if not self.armed:
+            self.publish_stop()
+            return
+        conflicts = self._foreign_cmd_vel_publishers()
+        if conflicts:
+            self._log_conflict(conflicts)
+            self.lock('another /cmd_vel publisher appeared')
+            return
+        command = Twist()
+        command.linear.x = (
+            self._shape_axis(self._axis(self.axes, 1)) * self.linear_speed)
+        command.angular.z = (
+            self._shape_axis(self._axis(self.axes, 3)) * self.angular_speed)
+        self.cmd_publisher.publish(command)
+        self._update_lift(elapsed)
+
+    def destroy_node(self):
+        if rclpy.ok():
+            try:
+                self.publish_stop(hold_lift=True)
+            except RuntimeError:
+                pass
+        return super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = CM029Teleop()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

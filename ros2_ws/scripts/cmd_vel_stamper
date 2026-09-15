@@ -2,6 +2,8 @@
 
 """Convert the final ROS 2 Jazzy Twist command into ros2_control TwistStamped."""
 
+import time
+
 from geometry_msgs.msg import Twist, TwistStamped
 import rclpy
 from rclpy.node import Node
@@ -16,10 +18,15 @@ class CmdVelStamper(Node):
         self.declare_parameter(
             'output_topic', '/base_controller/cmd_vel')
         self.declare_parameter('frame_id', 'base_footprint')
+        self.declare_parameter('require_single_publisher', True)
 
         input_topic = str(self.get_parameter('input_topic').value)
         output_topic = str(self.get_parameter('output_topic').value)
+        self.input_topic = input_topic
         self.frame_id = str(self.get_parameter('frame_id').value)
+        self.require_single_publisher = bool(
+            self.get_parameter('require_single_publisher').value)
+        self.last_conflict_warning = 0.0
 
         self.publisher = self.create_publisher(
             TwistStamped, output_topic, 10)
@@ -31,6 +38,20 @@ class CmdVelStamper(Node):
             f'{output_topic} (TwistStamped)')
 
     def command_callback(self, command):
+        if self.require_single_publisher:
+            sources = self.get_publishers_info_by_topic(
+                self.input_topic)
+            if len(sources) != 1:
+                now = time.monotonic()
+                if now - self.last_conflict_warning >= 2.0:
+                    self.last_conflict_warning = now
+                    names = ', '.join(
+                        f'{info.node_namespace.rstrip("/")}/{info.node_name}'
+                        for info in sources)
+                    self.get_logger().error(
+                        'Rejected /cmd_vel because it has '
+                        f'{len(sources)} publishers: {names}')
+                command = Twist()
         stamped = TwistStamped()
         stamped.header.stamp = self.get_clock().now().to_msg()
         stamped.header.frame_id = self.frame_id

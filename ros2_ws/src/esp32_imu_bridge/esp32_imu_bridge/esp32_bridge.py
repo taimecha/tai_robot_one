@@ -132,7 +132,12 @@ class ESP32ImuBridge(Node):
         if now - self.last_diagnostic < self.diagnostic_interval:
             return
         self.last_diagnostic = now
-        getattr(self.get_logger(), level)(message)
+        if level == 'info':
+            self.get_logger().info(message)
+        elif level == 'warning':
+            self.get_logger().warning(message)
+        else:
+            self.get_logger().error(message)
 
     def send_serial_line(self, line):
         """Write one bounded ASCII command; disconnect cleanly on failure."""

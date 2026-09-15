@@ -102,6 +102,16 @@ yaw và yaw-rate BNO055, phát `/odom` và là node duy nhất phát TF
 `cmd_vel_stamper` đổi `/cmd_vel` kiểu `Twist` từ teleop/Nav2 thành
 `/base_controller/cmd_vel` kiểu `TwistStamped`. Node này chỉ đóng dấu khi nhận
 lệnh mới và **không lặp lại lệnh**, vì lặp lại sẽ vô hiệu hóa ý nghĩa watchdog.
+
+CM029 cắm ở laptop và truyền `/joy` qua Wi-Fi. Chỉ sau khi kê bốn bánh và kiểm
+tra E-stop vật lý mới bật teleop trên Pi với giới hạn thấp:
+
+```bash
+ros2 launch tai_robot_one real_hardware.launch.py \
+  use_lift:=false use_rviz:=false use_cm029_teleop:=true \
+  cm029_linear_speed:=0.10 cm029_angular_speed:=0.25
+```
+
 Trên laptop Ubuntu cùng mạng ROS, source ROS/workspace rồi chạy RViz và teleop:
 
 ```bash

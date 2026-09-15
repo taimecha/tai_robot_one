@@ -268,3 +268,27 @@ ros2 topic hz /imu
 
 IMU bridge hiện được bật tự động trong `real_hardware.launch.py`. Không trỏ
 bridge vào `/dev/tai_drive`; cổng đúng là `/dev/tai_imu`.
+
+## Tay cầm CM029 qua Wi-Fi
+
+Receiver 2.4 GHz cắm vào laptop; chỉ `joy_node` chạy trên laptop:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 run joy joy_node --ros-args -p device_id:=0 -p deadzone:=0.05 \
+  -p autorepeat_rate:=20.0 -p coalesce_interval_ms:=1
+```
+
+Pi nhận `/joy` qua DDS và chạy teleop cùng launch phần cứng. Lần thử đầu phải
+kê cả bốn bánh khỏi sàn và giảm giới hạn:
+
+```bash
+ros2 launch tai_robot_one real_hardware.launch.py \
+  use_cm029_teleop:=true use_rviz:=false use_lift:=false \
+  cm029_linear_speed:=0.10 cm029_angular_speed:=0.25
+```
+
+Node luôn khởi động khóa. Nhả rồi nhấn Start để mở khóa; B gửi zero, giữ càng
+theo feedback `lift_joint` và khóa lại. Mất `/joy` quá 0.30 giây cũng khóa;
+reconnect không tự mở khóa. Không chạy phone teleop, keyboard teleop hoặc Nav2
+cùng lúc. B là stop phần mềm, không thay thế E-stop vật lý.

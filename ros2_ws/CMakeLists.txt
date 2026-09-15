@@ -153,6 +153,8 @@ install(
     scripts/cmd_vel_stamper
     scripts/astra_sim_range_filter
     scripts/nav_path_display_filter
+    scripts/cm029_teleop
+    scripts/scan_self_filter
     scripts/keyboard_teleop
     scripts/lift_position_controller
     scripts/phone_teleop_server

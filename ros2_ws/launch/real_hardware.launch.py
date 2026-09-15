@@ -29,14 +29,12 @@ def _start_after_success(action, process_name):
 
 def generate_launch_description():
     package_share = get_package_share_directory('tai_robot_one')
-    imu_package_share = get_package_share_directory('esp32_imu_bridge')
     xacro_file = os.path.join(
         package_share, 'description', 'robot.urdf.xacro')
     controllers_file = os.path.join(
         package_share, 'config', 'ros2_controllers_real.yaml')
     ekf_file = os.path.join(package_share, 'config', 'ekf.yaml')
-    imu_config = os.path.join(
-        imu_package_share, 'config', 'imu_bridge.yaml')
+    imu_config = os.path.join(package_share, 'config', 'imu_bridge.yaml')
     rviz_config = os.path.join(
         package_share, 'config', 'gazebo_robot.rviz')
 
@@ -46,6 +44,9 @@ def generate_launch_description():
     use_lift = LaunchConfiguration('use_lift')
     home_lift = LaunchConfiguration('home_lift_on_activate')
     use_rviz = LaunchConfiguration('use_rviz')
+    use_cm029_teleop = LaunchConfiguration('use_cm029_teleop')
+    cm029_linear_speed = LaunchConfiguration('cm029_linear_speed')
+    cm029_angular_speed = LaunchConfiguration('cm029_angular_speed')
 
     robot_description = ParameterValue(
         Command([
@@ -101,8 +102,8 @@ def generate_launch_description():
     )
 
     imu_bridge = Node(
-        package='esp32_imu_bridge',
-        executable='imu_node',
+        package='tai_robot_one',
+        executable='esp32_imu_bridge',
         name='esp32_imu_bridge',
         output='screen',
         parameters=[imu_config, {
@@ -119,6 +120,25 @@ def generate_launch_description():
         name='imu_visualizer',
         output='screen',
         parameters=[{'publish_rate': 20.0}],
+    )
+
+    cm029_teleop = Node(
+        package='tai_robot_one',
+        executable='cm029_teleop',
+        name='cm029_teleop',
+        output='screen',
+        parameters=[{
+            'use_sim_time': False,
+            'joy_topic': '/joy',
+            'linear_speed': ParameterValue(
+                cm029_linear_speed, value_type=float),
+            'angular_speed': ParameterValue(
+                cm029_angular_speed, value_type=float),
+            'deadzone': 0.10,
+            'joy_timeout': 0.30,
+            'lift_speed': 0.05,
+        }],
+        condition=IfCondition(use_cm029_teleop),
     )
 
     joint_state_broadcaster = Node(
@@ -218,11 +238,25 @@ def generate_launch_description():
             'use_rviz',
             default_value='false',
             description='Open RViz on the Raspberry Pi'),
+        DeclareLaunchArgument(
+            'use_cm029_teleop',
+            default_value='false',
+            description=(
+                'Run CM029 teleop on the Pi; joy_node remains on the laptop')),
+        DeclareLaunchArgument(
+            'cm029_linear_speed',
+            default_value='0.50',
+            description='CM029 maximum linear speed in m/s'),
+        DeclareLaunchArgument(
+            'cm029_angular_speed',
+            default_value='1.00',
+            description='CM029 maximum angular speed in rad/s'),
         robot_state_publisher,
         controller_manager,
         cmd_vel_stamper,
         imu_bridge,
         imu_visualizer,
+        cm029_teleop,
         ekf,
         start_joint_state_broadcaster,
         start_base_controller,

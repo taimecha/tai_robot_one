@@ -40,6 +40,7 @@ constexpr float LIFT_HOME_SPEED_M_S = 0.01f;
 constexpr uint32_t LIMIT_DEBOUNCE_MS = 25;
 constexpr uint32_t LIFT_COMMAND_TIMEOUT_MS = 350;
 constexpr uint32_t LIFT_HOME_TIMEOUT_MS = 60000;
+constexpr uint32_t LIFT_HOME_UPPER_RELEASE_TIMEOUT_MS = 750;
 constexpr uint32_t LIFT_TELEMETRY_INTERVAL_MS = 100;
 
 AccelStepper liftStepper(AccelStepper::DRIVER, LIFT_STEP_PIN, LIFT_DIR_PIN);
@@ -58,6 +59,7 @@ enum class LiftMode : uint8_t { UNHOMED, IDLE, MOVING, HOMING, FAULT };
 
 LiftMode liftMode = LiftMode::UNHOMED;
 bool liftHomed = false;
+bool liftHomeLeavingUpper = false;
 long liftTargetSteps = 0;
 uint32_t liftHomeStartedMs = 0;
 uint32_t liftLastCommandMs = 0;
@@ -137,6 +139,7 @@ void stopLift(LiftMode nextMode) {
   liftStepper.moveTo(liftTargetSteps);
   liftStepper.setSpeed(0.0f);
   liftMode = nextMode;
+  liftHomeLeavingUpper = false;
 }
 
 void setLiftFault(const char *fault) {
@@ -151,6 +154,7 @@ void acceptLowerHome() {
   liftTargetSteps = 0;
   liftStepper.moveTo(0);
   liftHomed = true;
+  liftHomeLeavingUpper = false;
   liftMode = LiftMode::IDLE;
   snprintf(liftFault, sizeof(liftFault), "NONE");
   Serial.println("EVENT,LIFT_HOME_COMPLETE");
@@ -171,10 +175,13 @@ void startLiftHome(uint32_t nowMs) {
     return;
   }
   liftHomed = false;
+  liftHomeLeavingUpper = upperLimit.active;
   liftHomeStartedMs = nowMs;
   liftMode = LiftMode::HOMING;
   liftStepper.setSpeed(-metresToSteps(LIFT_HOME_SPEED_M_S));
-  Serial.println("EVENT,LIFT_HOME_STARTED");
+  Serial.println(liftHomeLeavingUpper
+    ? "EVENT,LIFT_HOME_STARTED_FROM_UPPER"
+    : "EVENT,LIFT_HOME_STARTED");
 }
 
 void setLiftTarget(float targetMetres, uint32_t nowMs) {
@@ -270,12 +277,20 @@ void updateLift(uint32_t nowMs) {
     return;
   }
 
-  // Phep thu HOME phai an toan ngay ca khi DIR vat ly bi nguoc: bat ky cong
-  // tac nao duoc cham trong luc HOME deu dung xung. Chi cong tac day tao moc 0;
-  // cong tac dinh tao fault de khong the bi hieu nham la HOME thanh cong.
+  // Nếu reset ngay tại đỉnh, cho phép đi xuống một đoạn ngắn để nhả công tắc.
+  // Công tắc không nhả đúng hạn có thể là DIR ngược hoặc công tắc bị kẹt.
   if (liftMode == LiftMode::HOMING && upperLimit.active) {
-    setLiftFault("HOME_HIT_UPPER");
-    return;
+    if (!liftHomeLeavingUpper) {
+      setLiftFault("HOME_HIT_UPPER");
+      return;
+    }
+    if (nowMs - liftHomeStartedMs > LIFT_HOME_UPPER_RELEASE_TIMEOUT_MS) {
+      setLiftFault("HOME_UPPER_STUCK");
+      return;
+    }
+  } else if (liftMode == LiftMode::HOMING && liftHomeLeavingUpper) {
+    liftHomeLeavingUpper = false;
+    Serial.println("EVENT,LIFT_HOME_LEFT_UPPER");
   }
 
   // Chạm đáy luôn là mốc home thật. Khi đang nâng, vẫn cho phép
