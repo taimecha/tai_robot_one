@@ -30,7 +30,10 @@ base_controller:
 
     wheel_separation: 0.428
     wheel_radius: 0.0875
-    wheel_separation_multiplier: 1.0
+    # Real-base bidirectional calibration (2026-09-18): with 1.50, wheel odom
+    # exceeded the BNO055 turn by 7.1% outbound and 8.5% returning. Their
+    # weighted correction gives 1.62; verify again after mechanical service.
+    wheel_separation_multiplier: 1.62
     left_wheel_radius_multiplier: 1.0
     right_wheel_radius_multiplier: 1.0
 

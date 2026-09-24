@@ -119,6 +119,13 @@ public:
       angular = std::clamp(angular,
         velocity.angular.z - params_->max_angular_accel * control_duration_,
         velocity.angular.z + params_->max_angular_accel * control_duration_);
+      // Bench and loaded-floor tests show that smaller commands cannot
+      // reliably overcome four-wheel skid-steer scrub friction. Preserve an
+      // exact zero at the completion threshold above, but keep an active turn
+      // at or above the measured breakaway speed.
+      constexpr double kMinimumLoadedAngularSpeed = 0.25;
+      angular = std::copysign(
+        std::max(std::abs(angular), kMinimumLoadedAngularSpeed), angular);
       if (collision_checker_->isCollisionImminent(pose, 0.0, angular, 0.0)) {
         rotation_blocked_ = true;
         throw nav2_core::NoValidControl("Rotation command collision check failed");

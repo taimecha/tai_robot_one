@@ -8,6 +8,7 @@ from geometry_msgs.msg import Quaternion
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -61,10 +62,18 @@ class ImuVisualizer(Node):
         if publish_rate <= 0.0:
             raise ValueError('publish_rate must be positive')
         self.latest_message = None
+        self.latest_wheel_odom = None
+        self.latest_ekf_odom = None
+        self.yaw_origins = None
         self.marker_publisher = self.create_publisher(
             MarkerArray, '/imu/markers', 10)
         self.create_subscription(
             Imu, '/imu', self.imu_callback, qos_profile_sensor_data)
+        self.create_subscription(
+            Odometry, '/base_controller/odom',
+            self.wheel_odom_callback, 10)
+        self.create_subscription(
+            Odometry, '/odom', self.ekf_odom_callback, 10)
         self.create_timer(1.0 / publish_rate, self.publish_latest)
 
     @staticmethod
@@ -136,53 +145,83 @@ class ImuVisualizer(Node):
         """Keep only the newest sample; the display has its own exact timer."""
         self.latest_message = message
 
+    def wheel_odom_callback(self, message):
+        """Keep the latest encoder-only odometry sample."""
+        self.latest_wheel_odom = message
+
+    def ekf_odom_callback(self, message):
+        """Keep the latest filtered odometry sample."""
+        self.latest_ekf_odom = message
+
+    @staticmethod
+    def yaw_quaternion(yaw_degrees):
+        """Return a planar quaternion for a yaw angle in degrees."""
+        result = Quaternion()
+        half_yaw = math.radians(yaw_degrees) * 0.5
+        result.z = math.sin(half_yaw)
+        result.w = math.cos(half_yaw)
+        return result
+
+    @staticmethod
+    def relative_degrees(value, origin):
+        """Return the wrapped heading change from origin in [-180, 180)."""
+        return (value - origin + 180.0) % 360.0 - 180.0
+
     def publish_latest(self):
         """Publish RViz markers at the configured rate, independent of IMU Hz."""
         if self.latest_message is None:
             return
         message = self.latest_message
 
-        orientation = self.valid_orientation(message.orientation)
-        roll, pitch, yaw = euler_degrees(orientation)
-        # Markers live in base_footprint, whose TF already contains the fused
-        # vehicle yaw. Applying the absolute IMU yaw here would rotate the axes
-        # twice in RViz (90 degrees of travel would be rendered as 180). Keep
-        # the measured tilt for the live axes and show yaw numerically below.
-        marker_tilt = roll_pitch_quaternion(roll, pitch)
-        markers = MarkerArray()
-        colors = {
-            'x': (1.0, 0.1, 0.1),
-            'y': (0.1, 1.0, 0.1),
-            'z': (0.1, 0.35, 1.0),
-        }
+        if self.latest_wheel_odom is None or self.latest_ekf_odom is None:
+            return
 
-        for marker_id, axis in enumerate(('x', 'y', 'z')):
+        imu_yaw = euler_degrees(
+            self.valid_orientation(message.orientation))[2]
+        wheel_yaw = euler_degrees(self.valid_orientation(
+            self.latest_wheel_odom.pose.pose.orientation))[2]
+        ekf_yaw = euler_degrees(self.valid_orientation(
+            self.latest_ekf_odom.pose.pose.orientation))[2]
+        if self.yaw_origins is None:
+            self.yaw_origins = (imu_yaw, ekf_yaw, wheel_yaw)
+        imu_yaw = self.relative_degrees(imu_yaw, self.yaw_origins[0])
+        ekf_yaw = self.relative_degrees(ekf_yaw, self.yaw_origins[1])
+        wheel_yaw = self.relative_degrees(wheel_yaw, self.yaw_origins[2])
+        markers = MarkerArray()
+
+        # Markers are attached to the EKF-driven base_footprint frame. Rotate
+        # IMU and wheel arrows by their difference from EKF so all three arrows
+        # represent their headings in the same odom view without double yaw.
+        sources = (
+            ('IMU', imu_yaw, +0.24, (1.0, 0.1, 0.35)),
+            ('EKF', ekf_yaw, 0.00, (0.0, 0.55, 1.0)),
+            ('ENC', wheel_yaw, -0.24, (1.0, 0.75, 0.0)),
+        )
+        for marker_id, (label, yaw, lateral, color) in enumerate(sources):
             marker = self.base_marker(message, marker_id, Marker.ARROW)
-            marker.pose.orientation = self.multiply_quaternions(
-                marker_tilt, self.axis_rotation(axis))
-            marker.scale.x = 0.24
-            marker.scale.y = 0.025
-            marker.scale.z = 0.040
-            marker.color.r, marker.color.g, marker.color.b = colors[axis]
+            marker.pose.position.y = lateral
+            marker.pose.orientation = self.yaw_quaternion(yaw - ekf_yaw)
+            marker.scale.x = 0.48
+            marker.scale.y = 0.055
+            marker.scale.z = 0.055
+            marker.color.r, marker.color.g, marker.color.b = color
             marker.color.a = 1.0
             markers.markers.append(marker)
 
-        text = self.base_marker(message, 3, Marker.TEXT_VIEW_FACING)
-        text.pose.position.z += 0.28
-        text.pose.orientation.w = 1.0
-        text.scale.z = 0.075
-        text.color.r = 1.0
-        text.color.g = 1.0
-        text.color.b = 1.0
-        text.color.a = 1.0
-        text.text = (
-            'IMU /imu\n'
-            f'Roll={roll:+.1f}°  Pitch={pitch:+.1f}°  Yaw={yaw:+.1f}°\n'
-            f'wz={message.angular_velocity.z:+.3f} rad/s  '
-            f'a=({message.linear_acceleration.x:+.2f}, '
-            f'{message.linear_acceleration.y:+.2f}, '
-            f'{message.linear_acceleration.z:+.2f}) m/s²')
-        markers.markers.append(text)
+            text = self.base_marker(
+                message, marker_id + len(sources), Marker.TEXT_VIEW_FACING)
+            # Keep the complete label in a clear column to the left of the
+            # robot. Centering it near x=0 makes the numeric half overlap the
+            # corresponding arrow and becomes unreadable in top-down view.
+            text.pose.position.x = -0.72
+            text.pose.position.y = lateral
+            text.pose.position.z += 0.11
+            text.pose.orientation.w = 1.0
+            text.scale.z = 0.070
+            text.color.r, text.color.g, text.color.b = color
+            text.color.a = 1.0
+            text.text = f'{label} {yaw:+.2f}°'
+            markers.markers.append(text)
         self.marker_publisher.publish(markers)
 
 

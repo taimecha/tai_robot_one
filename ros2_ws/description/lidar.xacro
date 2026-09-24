@@ -20,11 +20,11 @@
     </material>
 
     <xacro:macro name="fork_mast_lidar"
-                 params="parent x:=0.0 y:=0.0 z:=0.0">
+                 params="parent x:=0.0 y:=0.0 z:=0.0 yaw:=0.0">
         <joint name="lidar_joint" type="fixed">
             <parent link="${parent}"/>
             <child link="lidar_link"/>
-            <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+            <origin xyz="${x} ${y} ${z}" rpy="0 0 ${yaw}"/>
         </joint>
 
         <!-- lidar_link is the optical scan plane. Its absolute height is set

@@ -21,6 +21,9 @@ const int CALIBRATION_INTERVAL_MS = 1000;
 const int ZERO_SETTLE_MS = 1000;
 const int ZERO_SAMPLE_COUNT = 50;
 const int ZERO_SAMPLE_INTERVAL_MS = 20;
+const int IMU_INVALID_SAMPLE_LIMIT = 10;
+const float IMU_MIN_ACCEL_NORM_M_S2 = 1.0f;
+const float IMU_MAX_ACCEL_NORM_M_S2 = 30.0f;
 
 // Càng nâng dùng chung ESP32 số 2 với BNO055. Hai công tắc nối
 // GPIO xuống GND: bình thường HIGH, chạm công tắc LOW.
@@ -387,6 +390,7 @@ void TaskLift(void *pvParameters) {
 }
 
 bool bnoAvailable = false;
+bool bnoDataFaultLatched = false;
 
 // ========================================================
 // QUATERNION OFFSET
@@ -693,6 +697,7 @@ void TaskIMU(void *pvParameters) {
   uint8_t gyroCalibration = 0;
   uint8_t accelCalibration = 0;
   uint8_t magCalibration = 0;
+  int invalidSampleCount = 0;
 
   for (;;) {
     // Core 0 owns USB parsing/telemetry. Core 1 receives only compact commands
@@ -703,6 +708,14 @@ void TaskIMU(void *pvParameters) {
 
     // Nếu chưa tìm thấy cảm biến, thử lại mỗi 2 giây
     if (!bnoAvailable) {
+      // A data-integrity fault must not silently reinitialize and redefine
+      // yaw while the robot may be moving. Reset ESP32 number 2 deliberately
+      // after stopping the vehicle to clear this latch.
+      if (bnoDataFaultLatched) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        continue;
+      }
+
       unsigned long currentTime =
         millis();
 
@@ -733,15 +746,6 @@ void TaskIMU(void *pvParameters) {
     imu::Quaternion currentQuaternion =
       bno.getQuat();
 
-    // ----------------------------------------
-    // Đặt lại zero nếu Serial yêu cầu
-    // ----------------------------------------
-    if (takeZeroRequest()) {
-      setQuaternionOffset(
-        currentQuaternion);
-      Serial.println("STATUS:ZERO_APPLIED");
-    }
-
     float current_qw =
       currentQuaternion.w();
 
@@ -754,71 +758,86 @@ void TaskIMU(void *pvParameters) {
     float current_qz =
       currentQuaternion.z();
 
+    // ----------------------------------------
+    // Đọc gia tốc
+    // ----------------------------------------
+    sensors_event_t accelData{};
+    sensors_event_t gyroData{};
+
+    const bool accelReadOK = bno.getEvent(
+      &accelData,
+      Adafruit_BNO055::VECTOR_ACCELEROMETER);
+
+    const bool gyroReadOK = bno.getEvent(
+      &gyroData,
+      Adafruit_BNO055::VECTOR_GYROSCOPE);
+
+    const float quaternionNorm = sqrtf(
+      current_qw * current_qw + current_qx * current_qx +
+      current_qy * current_qy + current_qz * current_qz);
+    const float accelerationNorm = sqrtf(
+      accelData.acceleration.x * accelData.acceleration.x +
+      accelData.acceleration.y * accelData.acceleration.y +
+      accelData.acceleration.z * accelData.acceleration.z);
+    const bool sampleValid = accelReadOK && gyroReadOK &&
+      isfinite(quaternionNorm) && quaternionNorm > 0.5f &&
+      quaternionNorm < 1.5f && isfinite(accelerationNorm) &&
+      accelerationNorm >= IMU_MIN_ACCEL_NORM_M_S2 &&
+      accelerationNorm <= IMU_MAX_ACCEL_NORM_M_S2 &&
+      isfinite(gyroData.gyro.x) && isfinite(gyroData.gyro.y) &&
+      isfinite(gyroData.gyro.z);
+
+    if (!sampleValid) {
+      invalidSampleCount++;
+      if (invalidSampleCount >= IMU_INVALID_SAMPLE_LIMIT) {
+        bnoDataFaultLatched = true;
+        bnoAvailable = false;
+        portENTER_CRITICAL(&imuMux);
+        sharedIMU.sensorOK = false;
+        portEXIT_CRITICAL(&imuMux);
+        Serial.printf(
+          "STATUS:BNO055_DATA_INVALID,qnorm=%.3f,anorm=%.3f\n",
+          quaternionNorm, accelerationNorm);
+      }
+      vTaskDelayUntil(&lastWakeTime, frequency);
+      continue;
+    }
+    invalidSampleCount = 0;
+
+    // Apply a requested zero only after validating the complete sensor sample.
+    if (takeZeroRequest()) {
+      setQuaternionOffset(currentQuaternion);
+      Serial.println("STATUS:ZERO_APPLIED");
+    }
+
     normalizeQuaternion(
       current_qw,
       current_qx,
       current_qy,
       current_qz);
 
-    // ----------------------------------------
-    // Q_relative =
-    //    inverse(Q_offset) × Q_current
-    // ----------------------------------------
+    // Q_relative = inverse(Q_offset) x Q_current.
     float relative_qw =
       inv_qw * current_qw - inv_qx * current_qx - inv_qy * current_qy - inv_qz * current_qz;
-
     float relative_qx =
       inv_qw * current_qx + inv_qx * current_qw + inv_qy * current_qz - inv_qz * current_qy;
-
     float relative_qy =
       inv_qw * current_qy - inv_qx * current_qz + inv_qy * current_qw + inv_qz * current_qx;
-
     float relative_qz =
       inv_qw * current_qz + inv_qx * current_qy - inv_qy * current_qx + inv_qz * current_qw;
+    normalizeQuaternion(relative_qw, relative_qx, relative_qy, relative_qz);
 
-    normalizeQuaternion(
-      relative_qw,
-      relative_qx,
-      relative_qy,
-      relative_qz);
-
-    // IMU được lắp xoay 90 độ quanh Z: +Y của cảm biến hướng về phía trước
-    // xe. Đổi toàn bộ dữ liệu sang REP-103 của robot (+X trước, +Y trái,
-    // +Z lên): X_robot=Y_imu, Y_robot=-X_imu, Z_robot=Z_imu.
+    // IMU is mounted +90 degrees around Z. Convert it to robot REP-103.
     const float robot_qw = relative_qw;
     const float robot_qx = relative_qy;
     const float robot_qy = -relative_qx;
     const float robot_qz = relative_qz;
 
-    // ----------------------------------------
-    // Chuyển sang Roll, Pitch, Yaw
-    // ----------------------------------------
     float roll;
     float pitch;
     float yaw;
-
     quaternionToEuler(
-      robot_qw,
-      robot_qx,
-      robot_qy,
-      robot_qz,
-      roll,
-      pitch,
-      yaw);
-
-    // ----------------------------------------
-    // Đọc gia tốc
-    // ----------------------------------------
-    sensors_event_t accelData;
-    sensors_event_t gyroData;
-
-    bno.getEvent(
-      &accelData,
-      Adafruit_BNO055::VECTOR_ACCELEROMETER);
-
-    bno.getEvent(
-      &gyroData,
-      Adafruit_BNO055::VECTOR_GYROSCOPE);
+      robot_qw, robot_qx, robot_qy, robot_qz, roll, pitch, yaw);
 
     // ----------------------------------------
     // Đọc calibration

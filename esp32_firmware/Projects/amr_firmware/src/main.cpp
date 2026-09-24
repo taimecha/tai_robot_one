@@ -59,14 +59,15 @@ constexpr MotorPins kMotorPins[kWheelCount] = {
     {"RR", 13, 22, 16, 17, +1, +1},
 };
 
-constexpr amr_drive::PidConfig kPidConfig = {
-    0.3f,   // Kp
-    0.02f,  // Ki per 20 ms sample
-    0.01f,  // Kd per 20 ms sample
-    1.47f,  // feed-forward PWM/RPM
-    3,      // static-friction feed-forward PWM
-    255.0f,
-    255,
+// Initial loaded-floor feed-forward calibration from the 2026-09-21
+// clockwise step test. Keep the feedback gains common until bidirectional
+// tests establish that a per-wheel feedback adjustment is necessary. The
+// front motors needed substantially more PWM per RPM than the rear motors.
+constexpr amr_drive::PidConfig kPidConfigs[kWheelCount] = {
+    {2.0f, 0.02f, 0.01f, 2.40f, 3, 255.0f, 255},  // FL
+    {2.0f, 0.02f, 0.01f, 2.40f, 3, 255.0f, 255},  // FR
+    {2.0f, 0.02f, 0.01f, 2.20f, 3, 255.0f, 255},  // RL
+    {2.0f, 0.02f, 0.01f, 2.20f, 3, 255.0f, 255},  // RR
 };
 
 enum StatusBits : uint16_t {
@@ -505,7 +506,7 @@ void updateMotorControl(uint32_t now_us) {
       motors[i].pid.reset(motors[i].measured_rpm);
     } else {
       motors[i].output_pwm = motors[i].pid.update(
-          motors[i].ramped_rpm, motors[i].measured_rpm, kPidConfig);
+          motors[i].ramped_rpm, motors[i].measured_rpm, kPidConfigs[i]);
     }
     writeMotorOutput(i, motors[i].output_pwm);
   }

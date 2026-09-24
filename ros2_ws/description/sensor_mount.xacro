@@ -52,7 +52,8 @@
         <color rgba="0.85 0.035 0.02 1"/>
     </material>
 
-    <xacro:macro name="mast_sensor_mount" params="parent include_lidar:=true">
+    <xacro:macro name="mast_sensor_mount"
+                 params="parent include_lidar:=true camera_pitch:=0.0">
         <!-- The mount frame lies on the laser scan plane. Because the mast is
              fixed, lifting the fork carriage does not move either sensor. -->
         <joint name="sensor_mount_joint" type="fixed">
@@ -118,7 +119,8 @@
         <xacro:astra_pro_camera parent="sensor_mount_link"
                                 x="${camera_x_on_mount}" y="0"
                                 z="${camera_eye_height_ground
-                                     - lidar_scan_height_ground}"/>
+                                     - lidar_scan_height_ground}"
+                                pitch="${camera_pitch}"/>
     </xacro:macro>
 
 </robot>

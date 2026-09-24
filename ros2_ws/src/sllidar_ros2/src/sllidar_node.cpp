@@ -35,6 +35,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <algorithm>
 #include <chrono>
 #include "sl_lidar.h"
 #include "math.h"
@@ -354,22 +355,34 @@ public:
         }
 
         rclcpp::Time start_scan_time;
-        std::chrono::steady_clock::time_point steady_start_scan_time;
-        std::chrono::steady_clock::time_point steady_end_scan_time;
-        double scan_duration;
+        auto previous_scan_time = std::chrono::steady_clock::now();
+        double scan_duration = 1.0 / std::max(1.0f, scan_frequency);
+        const double minimum_valid_period = scan_duration * 0.5;
+        const double maximum_valid_period = scan_duration * 2.5;
         while (rclcpp::ok() && !need_exit) {
             sl_lidar_response_measurement_node_hq_t nodes[8192];
             size_t   count = _countof(nodes);
 
-            steady_start_scan_time = std::chrono::steady_clock::now();
             op_result = drv->grabScanDataHq(nodes, count);
-            steady_end_scan_time = std::chrono::steady_clock::now();
-            scan_duration = std::chrono::duration<double>(
-                steady_end_scan_time - steady_start_scan_time).count();
-            start_scan_time = this->now() -
-                rclcpp::Duration::from_seconds(scan_duration);
 
             if (op_result == SL_RESULT_OK) {
+                const auto current_scan_time = std::chrono::steady_clock::now();
+                const double measured_period = std::chrono::duration<double>(
+                    current_scan_time - previous_scan_time).count();
+
+                // The SDK may return a queued scan immediately. Measuring only
+                // grabScanDataHq() then produces near-zero LaserScan timing and
+                // visibly distorts scans while the robot rotates.
+                if (measured_period >= minimum_valid_period &&
+                    measured_period <= maximum_valid_period) {
+                    scan_duration = 0.8 * scan_duration + 0.2 * measured_period;
+                    previous_scan_time = current_scan_time;
+                } else if (measured_period > maximum_valid_period) {
+                    previous_scan_time = current_scan_time;
+                }
+
+                start_scan_time = this->now() -
+                    rclcpp::Duration::from_seconds(scan_duration);
                 op_result = drv->ascendScanData(nodes, count);
                 float angle_min = DEG2RAD(0.0f);
                 float angle_max = DEG2RAD(360.0f);

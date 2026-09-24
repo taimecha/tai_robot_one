@@ -1,0 +1,10 @@
+/dynamic_joint_states:
+  history: keep_last
+  depth: 100
+  reliability: reliable
+  durability: volatile
+/imu:
+  history: keep_last
+  depth: 100
+  reliability: best_effort
+  durability: volatile

@@ -33,8 +33,9 @@ def generate_launch_description():
             'out.compressedDepth.png_level': 1,
         }],
         remappings=[
-            ('in', '/camera/depth/image_raw'),
-            ('out/compressedDepth', '/camera/depth/image_raw/compressedDepth'),
+            ('in', '/camera/depth/image_raw_10fps'),
+            ('out/compressedDepth',
+             '/camera/depth/image_raw/compressedDepth_10fps'),
         ],
     )
 

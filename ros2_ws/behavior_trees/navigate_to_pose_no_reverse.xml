@@ -1,15 +1,15 @@
 <!--
-  Forward path following with collision-checked reverse recovery.
+  Forward path following with conservative wait/replan/backup recovery.
   Replan only when the goal changes or the current path becomes invalid.
-  Recovery never clears observations. A controller failure
-  first triggers an orientation-aware SE2 plan AND an execution attempt.
-  Only if that fails are incremental opposite / alternative turns and short
-  forward motions attempted. The controller checks complete heading sweeps
-  and latches the chosen direction while that sweep remains collision-free.
+  Recovery never clears observations and never commands Spin or
+  DriveOnHeading. If a temporary obstacle invalidates the path, stop and wait
+  for fresh observations first. On the next failed attempt, back up slowly and
+  retry planning. All motion remains collision checked by Nav2 and Collision
+  Monitor.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="4" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithValidPathReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
@@ -24,71 +24,18 @@
               </ReactiveSequence>
               <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
             </Fallback>
-            <Wait name="WaitBeforePlanningRetry" wait_duration="1.0"/>
+            <Wait name="WaitBeforePlanningRetry" wait_duration="3.0"/>
           </RecoveryNode>
         </RateController>
         <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
       </PipelineSequence>
       <ReactiveFallback name="SafeStopRecovery">
         <GoalUpdated/>
-        <Fallback name="TryDifferentEscapeStrategies">
-          <!-- A valid XY path can require an impossible body rotation. Try
-               executing an orientation-aware route before any fixed recovery
-               manoeuvre. Planning success alone is not recovery success. -->
-          <Sequence name="PlanAndExecuteAlternativeBeforeSpinning">
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback"/>
-            <FollowPath path="{path}" controller_id="{selected_controller}"
-                        error_code_id="{follow_path_error_code}"/>
-          </Sequence>
-          <!-- A blocked rotation does not imply that forward translation is
-               blocked. Check this escape independently, before fixed spins. -->
-          <Sequence name="MoveForwardWithoutRequiringRotation">
-            <DriveOnHeading name="CheckedForwardEscape" dist_to_travel="0.25"
-                            speed="0.08" time_allowance="8.0"/>
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback"/>
-            <RecoveryNode number_of_retries="2" name="FinishClearingBeforeTryingToRotateAgain">
-              <FollowPath path="{path}" controller_id="{selected_controller}"
-                          error_code_id="{follow_path_error_code}"/>
-              <Sequence name="AnotherCheckedForwardStepThenReplan">
-                <DriveOnHeading dist_to_travel="0.25" speed="0.08" time_allowance="8.0"/>
-                <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback"/>
-              </Sequence>
-            </RecoveryNode>
-          </Sequence>
-          <Sequence name="CheckedReverseThenExecuteNewPlan">
-            <BackUp backup_dist="0.15" backup_speed="0.05" time_allowance="8.0"/>
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback"/>
-            <FollowPath path="{path}" controller_id="{selected_controller}"
-                        error_code_id="{follow_path_error_code}"/>
-          </Sequence>
-          <Sequence name="TurnOppositeMoveClearThenPlanAlternative">
-            <ComputeOppositeSpin recovery_angle="0.2617993878"
-                                 spin_dist="{opposite_spin_dist}"/>
-            <Spin name="TryOppositeTurnStep1" spin_dist="{opposite_spin_dist}"/>
-            <Spin name="TryOppositeTurnStep2" spin_dist="{opposite_spin_dist}"/>
-            <Spin name="TryOppositeTurnStep3" spin_dist="{opposite_spin_dist}"/>
-            <Spin name="TryOppositeTurnStep4" spin_dist="{opposite_spin_dist}"/>
-            <DriveOnHeading name="CommitToOppositeHeading"
-                            dist_to_travel="0.20"
-                            speed="0.08"
-                            time_allowance="8.0"/>
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback"/>
-          </Sequence>
-          <Sequence name="TryOtherTurnWhenOppositeIsBlocked">
-            <Script code="other_spin_dist := -opposite_spin_dist"/>
-            <Spin name="OtherTurnStep1" spin_dist="{other_spin_dist}"/>
-            <Spin name="OtherTurnStep2" spin_dist="{other_spin_dist}"/>
-            <Spin name="OtherTurnStep3" spin_dist="{other_spin_dist}"/>
-            <Spin name="OtherTurnStep4" spin_dist="{other_spin_dist}"/>
-            <DriveOnHeading name="MoveAlongOtherHeading"
-                            dist_to_travel="0.20" speed="0.08" time_allowance="8.0"/>
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback"/>
-          </Sequence>
-          <ComputePathToPose name="PlanLongerRouteWithoutTurningFirst"
-                             goal="{goal}" path="{path}"
-                             planner_id="SE2Fallback"/>
-          <Wait name="WaitForEnvironmentChange" wait_duration="0.5"/>
-        </Fallback>
+        <RoundRobin name="ConservativeRecoveryActions">
+          <Wait name="WaitForEnvironmentChange" wait_duration="3.0"/>
+          <BackUp name="ShortSlowBackUp" backup_dist="0.15" backup_speed="0.10"
+                  error_code_id="{backup_error_code}"/>
+        </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
   </BehaviorTree>

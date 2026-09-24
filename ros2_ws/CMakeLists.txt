@@ -25,6 +25,7 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(gz_sim_vendor QUIET)
 find_package(gz-sim8 QUIET)
 find_package(gz_transport_vendor QUIET)
@@ -61,12 +62,13 @@ target_include_directories(tai_robot_one_hardware PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(tai_robot_one_hardware PUBLIC
+target_link_libraries(tai_robot_one_hardware
   hardware_interface::hardware_interface
   pluginlib::pluginlib
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
 )
+ament_target_dependencies(tai_robot_one_hardware std_msgs)
 
 pluginlib_export_plugin_description_file(
   hardware_interface tai_robot_one_hardware.xml)
@@ -151,6 +153,7 @@ install(
 install(
   PROGRAMS
     scripts/cmd_vel_stamper
+    scripts/amcl_pose_persistence
     scripts/astra_sim_range_filter
     scripts/nav_path_display_filter
     scripts/cm029_teleop
@@ -159,6 +162,7 @@ install(
     scripts/lift_position_controller
     scripts/phone_teleop_server
     scripts/imu_visualizer
+    scripts/turn_relative_yaw
     scripts/test_robot_motion
     scripts/test_nav_round_trip
     scripts/monitor_sim_clearance
@@ -178,6 +182,6 @@ install(
 
 ament_export_targets(export_tai_robot_one_hardware HAS_LIBRARY_TARGET)
 ament_export_dependencies(
-  hardware_interface pluginlib rclcpp rclcpp_lifecycle)
+  hardware_interface pluginlib rclcpp rclcpp_lifecycle std_msgs)
 
 ament_package()

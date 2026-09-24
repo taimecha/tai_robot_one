@@ -46,7 +46,8 @@
 
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "pluginlib/class_list_macros.hpp"
-#include "rclcpp/logging.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
 
 namespace tai_robot_one
 {
@@ -62,6 +63,8 @@ constexpr std::array<const char *, 4> kWheelJointNames = {
   "rear_right_wheel_joint",
 };
 constexpr const char * kLiftJointName = "lift_joint";
+constexpr const char * kPidTargetVelocityInterface = "pid_target_velocity";
+constexpr const char * kPidOutputPwmInterface = "pid_output_pwm";
 constexpr double kDefaultMaxWheelSpeedRadS = 0.5 / 0.0875;
 constexpr double kDefaultMaxLiftPositionM = 0.520;
 constexpr uint16_t kBaseProtocolVersion = 1;
@@ -401,6 +404,8 @@ struct BaseState
   uint32_t command_age_ms{0};
   std::array<double, 4> position{};
   std::array<double, 4> velocity{};
+  std::array<double, 4> pid_target_velocity{};
+  std::array<double, 4> pid_output_pwm{};
   uint32_t rx_errors{0};
   uint32_t last_valid_frame_age_ms{0};
   SteadyClock::time_point received_at{};
@@ -533,6 +538,12 @@ public:
   hardware_interface::CallbackReturn configure()
   {
     resetRuntimeState();
+    if (!telemetry_node_) {
+      telemetry_node_ = std::make_shared<rclcpp::Node>("wheel_pid_telemetry_bridge");
+      telemetry_publisher_ =
+        telemetry_node_->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "/wheel_pid_telemetry", rclcpp::QoS(20).reliable().durability_volatile());
+    }
     std::string error;
     if (!drive_port_.openPort(drive_port_path_, drive_baud_, error)) {
       RCLCPP_ERROR(owner_.get_logger(), "Base ESP32: %s", error.c_str());
@@ -678,6 +689,12 @@ public:
       owner_.set_state(
         interfaceName(kWheelJointNames[index], hardware_interface::HW_IF_VELOCITY),
         base_state_.velocity[index]);
+      owner_.set_state(
+        interfaceName(kWheelJointNames[index], kPidTargetVelocityInterface),
+        base_state_.pid_target_velocity[index]);
+      owner_.set_state(
+        interfaceName(kWheelJointNames[index], kPidOutputPwmInterface),
+        base_state_.pid_output_pwm[index]);
     }
     if (use_lift_) {
       owner_.set_state(
@@ -791,17 +808,25 @@ private:
   {
     if (joint.command_interfaces.size() != 1 ||
       joint.command_interfaces.front().name != command_name ||
-      joint.state_interfaces.size() != 2)
+      joint.state_interfaces.size() !=
+      (command_name == hardware_interface::HW_IF_VELOCITY ? 4U : 2U))
     {
       return false;
     }
     bool has_position = false;
     bool has_velocity = false;
+    bool has_pid_target_velocity = false;
+    bool has_pid_output_pwm = false;
     for (const auto & state : joint.state_interfaces) {
       has_position = has_position || state.name == hardware_interface::HW_IF_POSITION;
       has_velocity = has_velocity || state.name == hardware_interface::HW_IF_VELOCITY;
+      has_pid_target_velocity =
+        has_pid_target_velocity || state.name == kPidTargetVelocityInterface;
+      has_pid_output_pwm = has_pid_output_pwm || state.name == kPidOutputPwmInterface;
     }
-    return has_position && has_velocity;
+    return has_position && has_velocity &&
+           (command_name != hardware_interface::HW_IF_VELOCITY ||
+           (has_pid_target_velocity && has_pid_output_pwm));
   }
 
   void setAllInterfacesToZero()
@@ -809,6 +834,8 @@ private:
     for (const char * joint : kWheelJointNames) {
       owner_.set_state(interfaceName(joint, hardware_interface::HW_IF_POSITION), 0.0);
       owner_.set_state(interfaceName(joint, hardware_interface::HW_IF_VELOCITY), 0.0);
+      owner_.set_state(interfaceName(joint, kPidTargetVelocityInterface), 0.0);
+      owner_.set_state(interfaceName(joint, kPidOutputPwmInterface), 0.0);
       owner_.set_command(interfaceName(joint, hardware_interface::HW_IF_VELOCITY), 0.0);
     }
     if (use_lift_) {
@@ -995,8 +1022,7 @@ private:
         setFatal("base STATE wheel feedback is malformed");
         return false;
       }
-      double ignored_target = 0.0;
-      if (!parseDouble(fields[16 + index], ignored_target)) {
+      if (!parseDouble(fields[16 + index], parsed.pid_target_velocity[index])) {
         setFatal("base STATE target is malformed");
         return false;
       }
@@ -1009,6 +1035,7 @@ private:
         setFatal("base STATE PWM is malformed");
         return false;
       }
+      parsed.pid_output_pwm[index] = static_cast<double>(parsed_pwm);
     }
     if (!parseUint32(fields[24], parsed.rx_errors) ||
       !parseUint32(fields[25], parsed.last_valid_frame_age_ms))
@@ -1033,7 +1060,36 @@ private:
     parsed.seen = true;
     parsed.received_at = SteadyClock::now();
     base_state_ = parsed;
+    publishWheelPidTelemetry();
     return true;
+  }
+
+  void publishWheelPidTelemetry()
+  {
+    if (!telemetry_publisher_) {
+      return;
+    }
+
+    std_msgs::msg::Float64MultiArray message;
+    message.layout.dim.resize(1);
+    message.layout.dim[0].label =
+      "sequence,uptime_ms,"
+      "FL_target,FL_velocity,FL_pwm,FL_position,"
+      "FR_target,FR_velocity,FR_pwm,FR_position,"
+      "RL_target,RL_velocity,RL_pwm,RL_position,"
+      "RR_target,RR_velocity,RR_pwm,RR_position";
+    message.layout.dim[0].size = 18;
+    message.layout.dim[0].stride = 18;
+    message.data.reserve(18);
+    message.data.push_back(static_cast<double>(base_state_.state_sequence));
+    message.data.push_back(static_cast<double>(base_state_.uptime_ms));
+    for (std::size_t index = 0; index < kWheelJointNames.size(); ++index) {
+      message.data.push_back(base_state_.pid_target_velocity[index]);
+      message.data.push_back(base_state_.velocity[index]);
+      message.data.push_back(base_state_.pid_output_pwm[index]);
+      message.data.push_back(base_state_.position[index]);
+    }
+    telemetry_publisher_->publish(message);
   }
 
   bool processLiftLine(const std::string & line)
@@ -1576,6 +1632,8 @@ private:
   }
 
   TaiRobotSerialSystem & owner_;
+  std::shared_ptr<rclcpp::Node> telemetry_node_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr telemetry_publisher_;
   SerialPort drive_port_;
   SerialPort lift_port_;
   std::string drive_port_path_{"/dev/tai_drive"};

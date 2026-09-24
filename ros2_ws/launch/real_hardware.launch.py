@@ -45,6 +45,7 @@ def generate_launch_description():
     home_lift = LaunchConfiguration('home_lift_on_activate')
     use_rviz = LaunchConfiguration('use_rviz')
     use_cm029_teleop = LaunchConfiguration('use_cm029_teleop')
+    cmd_vel_input_topic = LaunchConfiguration('cmd_vel_input_topic')
     cm029_linear_speed = LaunchConfiguration('cm029_linear_speed')
     cm029_angular_speed = LaunchConfiguration('cm029_angular_speed')
 
@@ -89,7 +90,10 @@ def generate_launch_description():
         executable='cmd_vel_stamper',
         name='cmd_vel_stamper',
         output='screen',
-        parameters=[{'use_sim_time': False}],
+        parameters=[{
+            'use_sim_time': False,
+            'input_topic': cmd_vel_input_topic,
+        }],
     )
 
     ekf = Node(
@@ -243,6 +247,10 @@ def generate_launch_description():
             default_value='false',
             description=(
                 'Run CM029 teleop on the Pi; joy_node remains on the laptop')),
+        DeclareLaunchArgument(
+            'cmd_vel_input_topic',
+            default_value='/cmd_vel',
+            description='Final unstamped velocity topic sent to ros2_control'),
         DeclareLaunchArgument(
             'cm029_linear_speed',
             default_value='0.50',

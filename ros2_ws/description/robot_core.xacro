@@ -438,12 +438,15 @@
         <xacro:mast_sensor_mount parent="mast_frame" include_lidar="true"/>
     </xacro:if>
     <xacro:unless value="$(arg use_sim)">
-        <xacro:mast_sensor_mount parent="mast_frame" include_lidar="false"/>
-        <!-- Chassis front is +0.3005 m. The scan axis is 0.437 m behind that
-             edge, hence x=-0.1365 m. The A1M8 scan plane is 50 mm above its
-             bottom, which rests on the 0.335 m-high chassis top. -->
+        <!-- The camera on the real bracket is pitched 20 degrees downward. -->
+        <xacro:mast_sensor_mount parent="mast_frame" include_lidar="false"
+                                 camera_pitch="${-20.0 * pi / 180.0}"/>
+        <!-- Real-robot scan alignment calibration: the temporary lidar mount
+             is 0.2115 m behind base_footprint. The A1M8 scan plane is 50 mm
+             above its bottom, which rests on the 0.335 m-high chassis top. -->
         <xacro:fork_mast_lidar parent="base_footprint"
-                               x="-0.1365" y="0.0" z="0.385"/>
+                               x="-0.2115" y="0.0" z="0.385"
+                               yaw="${-2.0 * pi / 180.0}"/>
     </xacro:unless>
 
     <!-- BNO055 mounted near the centre of the chassis top surface. -->

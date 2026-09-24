@@ -11,35 +11,45 @@ ekf_filter_node:
     base_link_frame: base_footprint
     world_frame: odom
 
-    # ros2_control wheel odometry. Keep only planar velocity; wheel slip makes
-    # integrating both its pose and velocity unnecessarily correlated.
+    # Fuse body-frame forward velocity, the nonholonomic vy=0 constraint, and
+    # wheel yaw-rate. Do not fuse
+    # the controller's absolute x/y or yaw: its odometry retains the encoder
+    # heading across a ROS restart while the relative BNO055/EKF heading starts
+    # at zero. Combining those incompatible axes made /odom report lateral
+    # motion and caused AMCL to globally disperse during straight travel.
+    # The EKF now integrates vx in its own IMU-defined odom frame. Wheel wz is
+    # retained only as a high-covariance fallback; the repaired BNO055 gyro and
+    # quaternion dominate when available.
     odom0: /base_controller/odom
     odom0_config: [false, false, false,
                    false, false, false,
-                   true,  false, false,
+                   true,  true,  false,
                    false, false, true,
                    false, false, false]
     odom0_queue_size: 10
     odom0_differential: false
     odom0_relative: false
 
-    # Fuse the BNO055 yaw (already zeroed by the ESP32 after startup) to bound
-    # heading drift, plus yaw rate for responsive turns.  Do not integrate
-    # linear acceleration into planar position: its small stationary bias would
-    # otherwise make odom drift while the vehicle is stopped.
+    # The BNO055 is zeroed independently whenever ESP32 number 2 boots, so use
+    # its quaternion yaw relative to the first received sample rather than as
+    # an absolute odom heading. Fuse gyro Z as well for responsive turns. The
+    # BNO055 wiring was repaired and a 416 s test on 2026-09-23 had no gaps;
+    # quaternion and integrated gyro agreed while wheel yaw under-reported the
+    # same rotations. Planar acceleration remains excluded because vibration
+    # and bias would integrate into false translation.
     imu0: /imu
     imu0_config: [false, false, false,
                   false, false, true,
                   false, false, false,
                   false, false, true,
                   false, false, false]
-    imu0_queue_size: 20
+    imu0_queue_size: 25
     imu0_differential: false
-    imu0_relative: false
-    imu0_remove_gravitational_acceleration: true
+    imu0_relative: true
+    imu0_remove_gravitational_acceleration: false
 
-    process_noise_covariance: [0.05, 0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                               0.0,  0.05, 0.0,  0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    process_noise_covariance: [0.001,0.0,  0.0,  0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                               0.0,  0.001,0.0,  0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                                0.0,  0.0,  0.06, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                                0.0,  0.0,  0.0,  0.03,0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                                0.0,  0.0,  0.0,  0.0, 0.03,0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,

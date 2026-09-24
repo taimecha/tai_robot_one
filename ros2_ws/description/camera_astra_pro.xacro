@@ -44,13 +44,13 @@
     </material>
 
     <xacro:macro name="astra_pro_camera"
-                 params="parent x:=0.0 y:=0.0 z:=0.0">
+                 params="parent x:=0.0 y:=0.0 z:=0.0 pitch:=0.0">
         <!-- camera_link is located at the centre of the forward-facing eye.
              REP-103 axes are X forward, Y left and Z up. -->
         <joint name="camera_joint" type="fixed">
             <parent link="${parent}"/>
             <child link="camera_link"/>
-            <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+            <origin xyz="${x} ${y} ${z}" rpy="0 ${pitch} 0"/>
         </joint>
 
         <link name="camera_link">

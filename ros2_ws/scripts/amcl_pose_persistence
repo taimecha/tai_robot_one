@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+
+"""Persist a trustworthy AMCL pose and restore it after a robot restart."""
+
+import json
+import math
+import os
+import tempfile
+import time
+
+from geometry_msgs.msg import PoseWithCovarianceStamped
+import rclpy
+from rclpy.node import Node
+
+
+class AmclPosePersistence(Node):
+    """Save only converged poses and restore the last one once per startup."""
+
+    def __init__(self):
+        super().__init__('amcl_pose_persistence')
+        default_file = os.path.expanduser(
+            '~/.ros/tai_robot_one/last_amcl_pose.json')
+        self.declare_parameter('state_file', default_file)
+        self.declare_parameter('restore_delay', 2.0)
+        self.declare_parameter('save_enable_delay', 5.0)
+        self.declare_parameter('max_xy_variance', 0.10)
+        self.declare_parameter('max_yaw_variance', 0.05)
+
+        self.state_file = os.path.expanduser(
+            str(self.get_parameter('state_file').value))
+        self.max_xy_variance = float(
+            self.get_parameter('max_xy_variance').value)
+        self.max_yaw_variance = float(
+            self.get_parameter('max_yaw_variance').value)
+        self.last_save_time = 0.0
+        self.pending_saved = None
+        self.restored = False
+        self.save_enabled_at = math.inf
+        self.save_enable_delay = float(
+            self.get_parameter('save_enable_delay').value)
+
+        self.publisher = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
+        self.subscription = self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self.pose_callback, 10)
+        delay = float(self.get_parameter('restore_delay').value)
+        self.restore_timer = self.create_timer(delay, self.restore_once)
+        self.save_timer = self.create_timer(2.0, self.flush_pending)
+
+    def restore_once(self):
+        if self.restored:
+            return
+        self.restored = True
+        self.restore_timer.cancel()
+        # Never let AMCL's temporary startup estimate overwrite the saved pose
+        # before we have had a chance to restore it.  Also allow AMCL time to
+        # consume /initialpose and converge before accepting a new pose.
+        self.save_enabled_at = time.monotonic() + self.save_enable_delay
+        try:
+            with open(self.state_file, encoding='utf-8') as stream:
+                saved = json.load(stream)
+        except FileNotFoundError:
+            self.get_logger().warning(
+                'No saved AMCL pose yet; waiting for a converged pose')
+            return
+        except (OSError, ValueError, KeyError) as error:
+            self.get_logger().error(f'Cannot restore saved AMCL pose: {error}')
+            return
+
+        message = PoseWithCovarianceStamped()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = 'map'
+        message.pose.pose.position.x = float(saved['x'])
+        message.pose.pose.position.y = float(saved['y'])
+        message.pose.pose.orientation.z = float(saved['qz'])
+        message.pose.pose.orientation.w = float(saved['qw'])
+        message.pose.covariance = [float(value) for value in saved['covariance']]
+        self.publisher.publish(message)
+        self.get_logger().info(
+            f'Restored AMCL pose x={saved["x"]:.3f}, '
+            f'y={saved["y"]:.3f}, yaw={saved["yaw_deg"]:.1f} deg')
+
+    def pose_callback(self, message):
+        if (not self.restored or
+                time.monotonic() < self.save_enabled_at):
+            return
+        covariance = message.pose.covariance
+        values = [
+            message.pose.pose.position.x,
+            message.pose.pose.position.y,
+            message.pose.pose.orientation.z,
+            message.pose.pose.orientation.w,
+            covariance[0], covariance[7], covariance[35],
+        ]
+        if not all(math.isfinite(value) for value in values):
+            return
+        if (covariance[0] > self.max_xy_variance or
+                covariance[7] > self.max_xy_variance or
+                covariance[35] > self.max_yaw_variance):
+            return
+        quaternion = message.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * quaternion.w * quaternion.z,
+            1.0 - 2.0 * quaternion.z * quaternion.z)
+        self.pending_saved = {
+            'x': message.pose.pose.position.x,
+            'y': message.pose.pose.position.y,
+            'qz': quaternion.z,
+            'qw': quaternion.w,
+            'yaw_deg': math.degrees(yaw),
+            'covariance': list(covariance),
+        }
+        if time.monotonic() - self.last_save_time >= 2.0:
+            self.flush_pending()
+
+    def flush_pending(self):
+        if self.pending_saved is None:
+            return
+        saved = self.pending_saved
+        directory = os.path.dirname(self.state_file)
+        os.makedirs(directory, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix='.amcl_pose_', dir=directory, text=True)
+        try:
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                json.dump(saved, stream, indent=2)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.state_file)
+            self.pending_saved = None
+            self.last_save_time = time.monotonic()
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = AmclPosePersistence()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.flush_pending()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
