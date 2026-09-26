@@ -37,6 +37,10 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav2_regulated_pure_pursuit_controller QUIET)
 find_package(nav2_core QUIET)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 if(nav2_regulated_pure_pursuit_controller_FOUND AND nav2_core_FOUND)
   add_library(tai_safe_rotation_rpp SHARED src/safe_rotation_rpp.cpp)
@@ -91,6 +95,12 @@ endif()
 
 # BT helper: return a recovery angle opposite to the last commanded turn.
 if(behaviortree_cpp_FOUND)
+  add_library(tai_path_footprint_clear_bt_node SHARED src/path_footprint_clear_bt_node.cpp)
+  target_include_directories(tai_path_footprint_clear_bt_node PRIVATE include)
+  target_compile_definitions(tai_path_footprint_clear_bt_node PRIVATE BT_PLUGIN_EXPORT)
+  ament_target_dependencies(tai_path_footprint_clear_bt_node
+    behaviortree_cpp rclcpp geometry_msgs nav_msgs nav2_msgs nav2_costmap_2d
+    tf2_geometry_msgs tf2_ros)
   add_library(tai_compute_opposite_spin_bt_node SHARED
     src/compute_opposite_spin_bt_node.cpp
   )
@@ -112,6 +122,17 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_rotation_sweep test/test_rotation_sweep.cpp)
   target_include_directories(test_rotation_sweep PRIVATE include)
+  if(TARGET tai_path_footprint_clear_bt_node)
+    find_package(nlohmann_json REQUIRED)
+    ament_add_gtest(test_path_footprint_bt test/test_path_footprint_bt.cpp)
+    ament_target_dependencies(test_path_footprint_bt
+      behaviortree_cpp rclcpp geometry_msgs nav_msgs nav2_msgs tf2_ros tf2_geometry_msgs)
+    target_link_libraries(test_path_footprint_bt nlohmann_json::nlohmann_json)
+    target_compile_definitions(test_path_footprint_bt PRIVATE
+      FOOTPRINT_BT_LIBRARY="$<TARGET_FILE:tai_path_footprint_clear_bt_node>"
+      REAL_ESCAPE_TREE="${CMAKE_CURRENT_SOURCE_DIR}/behavior_trees/navigate_real_clearance_escape.xml")
+    add_dependencies(test_path_footprint_bt tai_path_footprint_clear_bt_node)
+  endif()
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # uncomment the line when a copyright and license is not present in all source files
@@ -136,7 +157,8 @@ install(
 
 set(tai_install_targets tai_robot_one_hardware)
 foreach(optional_target
-    tai_physics_lidar tai_compute_opposite_spin_bt_node tai_safe_rotation_rpp)
+    tai_physics_lidar tai_compute_opposite_spin_bt_node tai_safe_rotation_rpp
+    tai_path_footprint_clear_bt_node)
   if(TARGET ${optional_target})
     list(APPEND tai_install_targets ${optional_target})
   endif()

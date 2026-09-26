@@ -56,7 +56,7 @@ def _nav2_actions(context, nav2_share, params_file):
         param_rewrites={
             'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': os.path.join(
                 get_package_share_directory('tai_robot_one'), 'behavior_trees',
-                'navigate_to_pose_no_reverse.xml'),
+                'navigate_real_clearance_escape.xml'),
             **test_rewrites,
             'use_sim_time': 'false',
             'yaml_filename': map_file,
@@ -74,6 +74,11 @@ def _nav2_actions(context, nav2_share, params_file):
             'amcl.ros__parameters.alpha3': '0.05',
             'amcl.ros__parameters.alpha4': '0.05',
             'collision_monitor.ros__parameters.source_timeout': '0.5',
+            # Real robot: keep the costmap footprint and swept-footprint
+            # approach checking, but remove the extra red stop envelope.
+            # Simulation continues to use VelocityStop from nav2_params.yaml.
+            'collision_monitor.ros__parameters.VelocityStop.enabled': 'false',
+            'collision_monitor.ros__parameters.VelocityStop.visualize': 'false',
             'collision_monitor.ros__parameters.rear_scan.enabled': 'false',
             'collision_monitor.ros__parameters.fork_scan.enabled': 'false',
             'collision_monitor.ros__parameters.camera_obstacle_scan.enabled':
@@ -82,6 +87,11 @@ def _nav2_actions(context, nav2_share, params_file):
                 LaunchConfiguration('use_camera'),
             'global_costmap.global_costmap.ros__parameters.camera_obstacle_layer.enabled':
                 LaunchConfiguration('use_camera'),
+            # There are no publishers for these optional sensors on the
+            # LiDAR-only robot; do not run empty obstacle layers.
+            'local_costmap.local_costmap.ros__parameters.fork_safety_layer.enabled': 'false',
+            'local_costmap.local_costmap.ros__parameters.rear_safety_layer.enabled': 'false',
+            'global_costmap.global_costmap.ros__parameters.fork_safety_layer.enabled': 'false',
         },
         convert_types=True,
     )
@@ -99,7 +109,10 @@ def _nav2_actions(context, nav2_share, params_file):
     navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(nav2_share, 'launch', 'navigation_launch.py')),
-        launch_arguments=common.items(),
+        launch_arguments={
+            **common,
+            'autostart': LaunchConfiguration('navigation_autostart'),
+        }.items(),
         condition=IfCondition(LaunchConfiguration('start_navigation')),
     )
     return [
@@ -239,6 +252,7 @@ def generate_launch_description():
         name='amcl_pose_persistence',
         output='screen',
         parameters=[{'use_sim_time': False}],
+        condition=IfCondition(LaunchConfiguration('restore_saved_pose')),
     )
 
     return LaunchDescription([
@@ -249,11 +263,17 @@ def generate_launch_description():
             'start_navigation', default_value='false',
             description='Start Nav2 planning/control after AMCL'),
         DeclareLaunchArgument(
+            'navigation_autostart', default_value='true',
+            description='Set false until AMCL has an initial pose'),
+        DeclareLaunchArgument(
             'use_cm029_teleop', default_value='false',
             description='Allow CM029 only while start_navigation is false'),
         DeclareLaunchArgument(
             'use_camera', default_value='true',
             description='Start Astra and enable camera obstacle sources'),
+        DeclareLaunchArgument(
+            'restore_saved_pose', default_value='true',
+            description='Restore and persist the last AMCL pose'),
         DeclareLaunchArgument(
             'motion_test', default_value='false', choices=['true', 'false'],
             description='Single-goal diagnostic without automatic motion recovery'),

@@ -1,40 +1,39 @@
 <!--
-  Forward path following with conservative wait/replan/backup recovery.
-  Replan only when the goal changes or the current path becomes invalid.
-  Recovery never clears observations and never commands Spin or
-  DriveOnHeading. If a temporary obstacle invalidates the path, stop and wait
-  for fresh observations first. On the next failed attempt, back up slowly and
-  retry planning. All motion remains collision checked by Nav2 and Collision
-  Monitor.
+  Prefer the short XY route from GridBased; fall back to the heading-aware
+  forward-only planner when GridBased cannot find a path.
+  Wait for transient obstacles before one short collision-checked backup.
+  Never clear obstacle observations or drive blindly forward in recovery.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="4" name="NavigateRecovery">
-      <PipelineSequence name="NavigateWithValidPathReplanning">
-        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
-        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
-        <RateController hz="1.0" name="RateControllerComputePathToPose">
-          <RecoveryNode number_of_retries="1" name="RecoveryComputePathToPose">
-            <Fallback name="FallbackComputePathToPose">
-              <ReactiveSequence name="CheckIfNewPathNeeded">
-                <Inverter>
-                  <GlobalUpdatedGoal/>
-                </Inverter>
-                <IsPathValid path="{path}"/>
-              </ReactiveSequence>
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-            </Fallback>
-            <Wait name="WaitBeforePlanningRetry" wait_duration="3.0"/>
-          </RecoveryNode>
+      <PipelineSequence name="NavigateWithShortestPathReplanning">
+        <RateController hz="0.5" name="RateControllerComputePathToPose">
+          <Fallback name="PlannerFallback">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback" error_code_id="{compute_path_error_code}"/>
+          </Fallback>
         </RateController>
-        <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+        <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
       </PipelineSequence>
-      <ReactiveFallback name="SafeStopRecovery">
+      <ReactiveFallback name="SafeRecovery">
         <GoalUpdated/>
-        <RoundRobin name="ConservativeRecoveryActions">
-          <Wait name="WaitForEnvironmentChange" wait_duration="3.0"/>
-          <BackUp name="ShortSlowBackUp" backup_dist="0.15" backup_speed="0.10"
-                  error_code_id="{backup_error_code}"/>
+        <RoundRobin name="BoundedRecoveryActions">
+          <Sequence name="WaitAndReplan">
+            <Wait name="WaitForEnvironmentChange" wait_duration="3.0"/>
+            <Fallback name="PlannerAfterWait">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback" error_code_id="{compute_path_error_code}"/>
+            </Fallback>
+          </Sequence>
+          <Sequence name="BackUpAndReplan">
+            <BackUp name="ShortSlowBackUp" backup_dist="0.15" backup_speed="0.08"
+                    time_allowance="5.0" error_code_id="{backup_error_code}"/>
+            <Fallback name="PlannerAfterBackUp">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback" error_code_id="{compute_path_error_code}"/>
+            </Fallback>
+          </Sequence>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>

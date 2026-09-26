@@ -1,0 +1,174 @@
+<!--
+  Validate the padded body/forks and launch rotation before following a route.
+  Keep a usable path stable; shortest XY first, SE2 as the alternative.
+  Recovery never backs up because a distant destination is blocked.
+  Rank complete routes via checked forward starts before local escape.
+  Advance only along a full checked route or to a checked turning/exit pocket.
+  BackUp stays active continuously until an exit is available at the current pose.
+  Do not clear obstacle data and do not blindly spin into an obstacle.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+    <ResetEscapeState reset_motion_history="true"/>
+    <WaitForClearanceData/>
+    <RecoveryNode number_of_retries="2147483647" name="NavigateUntilEscapeBlocked">
+      <PipelineSequence name="FollowFeasibleShortRoute">
+        <RateController hz="0.5">
+          <Fallback name="KeepValidRouteOrFindAnother">
+            <ReactiveSequence name="KeepStableRoute">
+              <Inverter><GlobalUpdatedGoal/></Inverter>
+              <PathFootprintClear path="{path}" goal="{goal}" planner_id="{path_planner}" prepared="true" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+            </ReactiveSequence>
+            <Sequence name="ShortestNearbyStraightRouteFits">
+              <PathFootprintClear motion="direct" goal="{goal}" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+            </Sequence>
+            <Sequence name="ShortestRouteFits">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+              <PathFootprintClear path="{path}" goal="{goal}" planner_id="GridBased" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+            </Sequence>
+            <Sequence name="AlternativeRouteFits">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback" error_code_id="{compute_path_error_code}"/>
+              <PathFootprintClear path="{path}" goal="{goal}" planner_id="SE2Fallback" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+            </Sequence>
+          </Fallback>
+        </RateController>
+        <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+      </PipelineSequence>
+      <ReactiveFallback name="EscapeBeforeGivingUp">
+        <GoalUpdated/>
+        <Sequence name="TryForwardThenRetreat">
+          <PathFootprintClear data_only="true"/>
+          <ResetEscapeState/>
+          <Fallback name="ForwardAlternativesBeforeReverse">
+            <Sequence name="RetryNearbyStraightRoute">
+              <PathFootprintClear motion="direct" goal="{goal}" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+              <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+            </Sequence>
+            <Sequence name="TryDifferentHeadingAwareRoute">
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="SE2Fallback" error_code_id="{compute_path_error_code}"/>
+              <PathFootprintClear path="{path}" goal="{goal}" planner_id="SE2Fallback" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+              <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+            </Sequence>
+            <Sequence name="RetryShortestRouteWithFreshObstacles">
+              <Wait wait_duration="0.2"/>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+              <PathFootprintClear path="{path}" goal="{goal}" planner_id="GridBased" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+              <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+            </Sequence>
+            <Sequence name="ForwardRoutesBeforeRestrictedLocalEscape">
+              <PathFootprintClear motion="motion_fault_free" goal="{goal}" controller_error="{follow_path_error_code}"/>
+              <Fallback name="CompleteForwardRoutesBeforeLastResortManeuvers">
+                <ForwardRouteSearch candidate_distance="{forward_route_distance}" candidate_path="{forward_candidate_path}" candidate_planner="{forward_candidate_planner}" controller_error="{follow_path_error_code}" path="{path}" planner_id="{path_planner}" local_check_distance="{forward_route_local_range}">
+                  <ReactiveSequence name="SearchForwardStartsWithoutMotion">
+                    <PathFootprintClear data_only="true"/>
+                    <Sequence>
+                      <PathFootprintClear motion="forward_candidate" goal="{goal}" candidate_distance="{forward_route_distance}" forward_start="{forward_route_start}"/>
+                      <Fallback>
+                        <Sequence>
+                          <ComputePathToPose goal="{goal}" start="{forward_route_start}" use_start="true" path="{forward_candidate_path}" planner_id="GridBased" error_code_id="{forward_route_planner_error}"/>
+                          <PathFootprintClear motion="forward_route" path="{forward_candidate_path}" candidate_start="{forward_route_start}" goal="{goal}" planner_id="GridBased" checked_path="{forward_candidate_path}" path_planner="{forward_candidate_planner}" blocked_near_robot="{forward_candidate_blocked}"/>
+                        </Sequence>
+                        <Sequence>
+                          <ComputePathToPose goal="{goal}" start="{forward_route_start}" use_start="true" path="{forward_candidate_path}" planner_id="SE2Fallback" error_code_id="{forward_route_planner_error}"/>
+                          <PathFootprintClear motion="forward_route" path="{forward_candidate_path}" candidate_start="{forward_route_start}" goal="{goal}" planner_id="SE2Fallback" checked_path="{forward_candidate_path}" path_planner="{forward_candidate_planner}" blocked_near_robot="{forward_candidate_blocked}"/>
+                        </Sequence>
+                      </Fallback>
+                    </Sequence>
+                  </ReactiveSequence>
+                  <PathFootprintClear path="{path}" goal="{goal}" planner_id="{path_planner}" prepared="true" local_check_distance="{forward_route_local_range}" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+                  <ReactiveSequence name="ExecuteRankedForwardRouteWithFreshCollisionChecks">
+                    <PathFootprintClear data_only="true"/>
+                    <PathFootprintClear path="{path}" goal="{goal}" planner_id="{path_planner}" prepared="true" local_check_distance="{forward_route_local_range}" checked_path="{path}" path_planner="{path_planner}" blocked_near_robot="{local_escape_required}"/>
+                    <FollowPath path="{path}" controller_id="FollowPath" error_code_id="{follow_path_error_code}"/>
+                  </ReactiveSequence>
+                </ForwardRouteSearch>
+                <Sequence name="LocalManeuversOnlyAfterHealthyRouteFailures">
+                  <PathFootprintClear motion="recovery_allowed" goal="{goal}" planner_error="{compute_path_error_code}" controller_error="{follow_path_error_code}" local_blocked="{local_escape_required}"/>
+              <IfThenElse name="AdvanceBeforeOtherEscape">
+                  <PathFootprintClear motion="forward" goal="{goal}" forward_distance="{escape_forward_distance}"/>
+                  <Fallback name="AdvanceOrRetreatWhenPocketIsLost">
+                    <Sequence>
+                      <PathFootprintClear motion="forward_begin" goal="{goal}" candidate_distance="{escape_forward_distance}"/>
+                      <ReactiveSequence>
+                        <PathFootprintClear motion="forward_safe" goal="{goal}"/>
+                        <DriveOnHeading dist_to_travel="{escape_forward_distance}" speed="0.08" time_allowance="25.0" error_code_id="{escape_forward_error}"/>
+                      </ReactiveSequence>
+                      <PathFootprintClear motion="forward_complete" goal="{goal}"/>
+                      <ResetEscapeState invalidate_path="true"/>
+                    </Sequence>
+                    <Sequence>
+                      <PathFootprintClear motion="forward_collision" goal="{goal}" motion_error="{escape_forward_error}"/>
+                      <Wait wait_duration="0.3"/>
+                      <PathFootprintClear data_only="true"/>
+                      <SubTree ID="CheckedRetreatAndTurn" _autoremap="true"/>
+                    </Sequence>
+                  </Fallback>
+                <IfThenElse name="TurnBeforeRetreat">
+                  <PathFootprintClear motion="turn" goal="{goal}" turn_angle="{escape_turn_angle}"/>
+                  <Fallback name="TurnOrRetreatAfterGeometricStop">
+                    <Sequence>
+                      <PathFootprintClear motion="turn_begin" goal="{goal}" candidate_angle="{escape_turn_angle}"/>
+                      <Spin spin_dist="{escape_turn_angle}" time_allowance="25.0" error_code_id="{escape_turn_error}"/>
+                      <ResetEscapeState invalidate_path="true" turn_completed="true"/>
+                    </Sequence>
+                    <Sequence name="ContinueRetreatAfterSpinCollision">
+                      <PathFootprintClear motion="turn_collision" goal="{goal}" motion_error="{escape_turn_error}"/>
+                      <SubTree ID="CheckedRetreatAndTurn" _autoremap="true"/>
+                    </Sequence>
+                    <Sequence name="RetreatIfSelectedTurnNoLongerFits">
+                      <PathFootprintClear motion="lost_exit" goal="{goal}" motion_error="{escape_turn_error}"/>
+                      <SubTree ID="CheckedRetreatAndTurn" _autoremap="true"/>
+                    </Sequence>
+                  </Fallback>
+                <SubTree ID="CheckedRetreatAndTurn" _autoremap="true"/>
+                </IfThenElse>
+              </IfThenElse>
+                </Sequence>
+              </Fallback>
+            </Sequence>
+          </Fallback>
+        </Sequence>
+      </ReactiveFallback>
+    </RecoveryNode>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="CheckedRetreatAndTurn">
+    <Fallback name="ContinuousRetreatUntilSafeTurnOrRearBlocked">
+      <ReactiveSequence>
+        <PathFootprintClear motion="reverse_needed" goal="{goal}"/>
+        <BackUp backup_dist="10.0" backup_speed="0.08" time_allowance="180.0" error_code_id="{backup_error_code}"/>
+      </ReactiveSequence>
+      <Sequence name="BrakeThenExecuteAvailableTurnNow">
+        <PathFootprintClear motion="escape_available" goal="{goal}"/>
+        <Wait wait_duration="0.3"/>
+        <PathFootprintClear data_only="true"/>
+        <IfThenElse>
+          <PathFootprintClear motion="turn" goal="{goal}" turn_angle="{escape_turn_angle}"/>
+          <Fallback>
+            <Sequence>
+              <PathFootprintClear motion="turn_begin" goal="{goal}" candidate_angle="{escape_turn_angle}"/>
+              <Spin spin_dist="{escape_turn_angle}" time_allowance="25.0" error_code_id="{escape_turn_error}"/>
+              <ResetEscapeState turn_completed="true"/>
+            </Sequence>
+            <PathFootprintClear motion="turn_collision" goal="{goal}" motion_error="{escape_turn_error}"/>
+          </Fallback>
+          <PathFootprintClear motion="escape_available" goal="{goal}"/>
+        </IfThenElse>
+        <ResetEscapeState invalidate_path="true"/>
+      </Sequence>
+      <Sequence name="ContinueRetreatIfTurningPocketLostWhileBraking">
+        <PathFootprintClear motion="lost_exit" goal="{goal}" motion_error="{escape_turn_error}"/>
+        <ResetEscapeState invalidate_path="true"/>
+        <Wait wait_duration="0.3"/>
+        <PathFootprintClear data_only="true"/>
+      </Sequence>
+      <Sequence name="ReplanAfterRetreatStops">
+        <PathFootprintClear motion="replan_after_retreat" goal="{goal}" motion_error="{backup_error_code}"/>
+        <ResetEscapeState invalidate_path="true"/>
+        <Wait wait_duration="0.3"/>
+        <PathFootprintClear data_only="true"/>
+      </Sequence>
+    </Fallback>
+  </BehaviorTree>
+</root>

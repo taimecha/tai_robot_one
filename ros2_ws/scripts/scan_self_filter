@@ -3,7 +3,6 @@
 import math
 
 import rclpy
-from builtin_interfaces.msg import Time
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
@@ -72,11 +71,11 @@ class ScanSelfFilter(Node):
         filtered.intensities = scan.intensities
         self.publisher.publish(filtered)
 
-        # A zero stamp asks RViz to use the latest transform. Keep the
-        # accurately stamped output above for SLAM and navigation.
+        # RViz also needs the scan's real acquisition stamp to transform
+        # lidar_link into map. A zero stamp made this display permanently
+        # report "Could not transform from [lidar_link] to [map]".
         rviz_scan = LaserScan()
-        rviz_scan.header.frame_id = filtered.header.frame_id
-        rviz_scan.header.stamp = Time()
+        rviz_scan.header = filtered.header
         rviz_scan.angle_min = filtered.angle_min
         rviz_scan.angle_max = filtered.angle_max
         rviz_scan.angle_increment = filtered.angle_increment

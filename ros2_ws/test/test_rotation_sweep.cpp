@@ -2,10 +2,86 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 #include "tai_robot_one/rotation_sweep.hpp"
+#include "tai_robot_one/path_clearance.hpp"
+#include "tai_robot_one/path_tracking.hpp"
+#include "tai_robot_one/path_selection.hpp"
+#include "tai_robot_one/escape_memory.hpp"
+
+TEST(EscapeMemory, SmallAdjustmentsInSameRegionCommitRetreat)
+{
+  tai_robot_one::EscapeMemory memory;
+  memory.noteAdjustment(0, 0);
+  EXPECT_FALSE(memory.committed);
+  memory.noteAdjustment(.15, 0);
+  EXPECT_TRUE(memory.committed);
+  EXPECT_FALSE(memory.observe(.60, 0));  // advancing is not backing out
+  memory.beginReverse(.15, 0, 0);
+  EXPECT_FALSE(memory.observe(.05, 0));
+  EXPECT_FALSE(memory.observe(.15, .40));  // sideways distance is not retreat
+  EXPECT_TRUE(memory.observe(-.16, 0));
+  EXPECT_FALSE(memory.committed);
+  EXPECT_EQ(memory.attempts, 0u);
+}
+
+TEST(EscapeMemory, CollisionCommitIsIdempotentAndUsesActualReverseHeading)
+{
+  tai_robot_one::EscapeMemory memory;
+  memory.commit();
+  memory.beginReverse(1, 1, tai_robot_one::kPi / 2);
+  memory.commit();
+  memory.beginReverse(1, .90, 0);  // repeated guard must not reset the anchor
+  EXPECT_FALSE(memory.observe(1, .80));
+  EXPECT_TRUE(memory.observe(1, .69));
+}
+
+TEST(EscapeMemory, SignificantNewRegionAndNewGoalResetLocalAttempts)
+{
+  tai_robot_one::EscapeMemory memory;
+  memory.noteAdjustment(0, 0);
+  EXPECT_TRUE(memory.observe(.46, 0));
+  memory.noteAdjustment(.46, 0);
+  EXPECT_FALSE(memory.committed);
+  memory.commit();
+  memory.reset();
+  EXPECT_FALSE(memory.committed);
+  EXPECT_FALSE(memory.region_active);
+}
+
+TEST(PathPreference, PrefersShortRoutesAndLessTurning)
+{
+  using tai_robot_one::routePreference;
+  EXPECT_LT(routePreference({{0, 0, 0}, {1, 0, 0}}),
+    routePreference({{0, 0, 0}, {2, 0, 0}}));
+  EXPECT_LT(routePreference({{0, 0, 0}, {1, 0, 0}}),
+    routePreference({{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 0, 0}}));
+  EXPECT_LT(routePreference({{0, 0, 0}, {0, 0, 1}, {1, 0, 1}}),
+    routePreference({{0, 0, 0}, {2, 0, 0}}));
+}
+
+TEST(PathPreference, RejectsEmptyOrNonFiniteRoutes)
+{
+  EXPECT_FALSE(std::isfinite(tai_robot_one::routePreference({})));
+  EXPECT_FALSE(std::isfinite(tai_robot_one::routePreference(
+    {{0, 0, 0}, {std::numeric_limits<double>::quiet_NaN(), 0, 0}})));
+}
+
+TEST(PathTracking, SmallCellOffsetDoesNotCauseLargeInitialSpin)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {0.025, 0.025, 0.0}, {0.075, 0.025, 0.0}, {0.25, 0.0, 0.0}});
+  EXPECT_NEAR(target.initial_angle, 0.0, 1e-9);
+}
+
+TEST(PathTracking, LargeOffRouteOffsetStillUsesPointBearing)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {0.3, 0.3, 0.0}, {0.4, 0.3, 0.0}});
+  EXPECT_NEAR(target.initial_angle, tai_robot_one::kPi / 4, 1e-9);
+}
 
 using tai_robot_one::chooseRotation;
-using tai_robot_one::kPi;
 using tai_robot_one::rotationSweepClear;
+using tai_robot_one::StationaryTurnGuard;
 using tai_robot_one::wrapAngle;
 
 TEST(RotationSweep, PrefersShortSafeDirection)
@@ -14,10 +90,12 @@ TEST(RotationSweep, PrefersShortSafeDirection)
   EXPECT_DOUBLE_EQ(*chooseRotation(-1.0, [](double) {return true;}), -1.0);
 }
 
-TEST(RotationSweep, OppositeMeansOppositePreviousSignNotAlwaysLeft)
+TEST(RotationSweep, TriesOppositeCompleteSweepWhenShortSweepBlocked)
 {
-  EXPECT_NEAR(*chooseRotation(1.0, [](double a) {return a < 0;}), 1.0-2*kPi, 1e-12);
-  EXPECT_NEAR(*chooseRotation(-1.0, [](double a) {return a > 0;}), 2*kPi-1.0, 1e-12);
+  EXPECT_NEAR(*chooseRotation(1.0, [](double a) {return a < 0;}),
+    1.0 - 2.0 * tai_robot_one::kPi, 1e-9);
+  EXPECT_NEAR(*chooseRotation(-1.0, [](double a) {return a > 0;}),
+    -1.0 + 2.0 * tai_robot_one::kPi, 1e-9);
 }
 
 TEST(RotationSweep, RejectsWhenBothDirectionsBlocked)
@@ -46,9 +124,91 @@ TEST(RotationSweep, SamplesBelowHalfOfTwoCentimeterCellAtForkTip)
   double previous = 0.0;
   double maximum_step = 0.0;
   EXPECT_TRUE(rotationSweepClear(0.0, 0.1, [&](double angle) {
-    maximum_step = std::max(maximum_step, angle - previous);
-    previous = angle;
-    return false;
+      maximum_step = std::max(maximum_step, angle - previous);
+      previous = angle;
+      return false;
   }));
   EXPECT_LT(0.84 * maximum_step, 0.01);
+}
+
+TEST(RotationSweep, StopsRepeatedSameDirectionTurnsAcrossYawWrap)
+{
+  StationaryTurnGuard guard;
+  EXPECT_FALSE(guard.update(0.0, 0.0, 3.0));
+  for (int i = 1; i <= 36; ++i) {
+    EXPECT_FALSE(guard.update(0.0, 0.0, wrapAngle(3.0 + i * 0.18)));
+  }
+  EXPECT_TRUE(guard.update(0.0, 0.0, wrapAngle(3.0 + 37 * 0.18)));
+}
+
+TEST(RotationSweep, MeaningfulTranslationResetsTurnBudget)
+{
+  StationaryTurnGuard guard;
+  EXPECT_FALSE(guard.update(0.0, 0.0, 0.0));
+  EXPECT_FALSE(guard.update(0.0, 0.0, 3.0));
+  EXPECT_FALSE(guard.update(0.05, 0.0, 3.0));
+  EXPECT_FALSE(guard.update(0.05, 0.0, 3.5));
+}
+
+TEST(RotationSweep, ShortRetreatClearsTrippedBudget)
+{
+  StationaryTurnGuard guard;
+  EXPECT_FALSE(guard.update(0, 0, 0));
+  for (int i = 1; i <= 70; ++i) {
+    guard.update(0, 0, wrapAngle(i * 0.1));
+  }
+  EXPECT_TRUE(guard.update(0, 0, wrapAngle(7.0)));
+  EXPECT_FALSE(guard.update(-0.05, 0, wrapAngle(7.0)));
+}
+
+TEST(PathClearance, RejectsObstacleBetweenWaypoints)
+{
+  EXPECT_FALSE(tai_robot_one::poseSegmentClear(0, 0, 0, 1, 0, 0, 0.025,
+    [](double x, double, double) {return x > 0.495 && x < 0.505;}));
+}
+
+TEST(PathClearance, RejectsForkSweepEvenWhenEndpointsFit)
+{
+  EXPECT_FALSE(tai_robot_one::poseSegmentClear(0, 0, 0, 0, 0, 1.0, 0.025,
+    [](double, double, double a) {return a > 0.49 && a < 0.51;}));
+}
+
+TEST(PathClearance, AcceptsClearCorridor)
+{
+  EXPECT_TRUE(tai_robot_one::poseSegmentClear(0, 0, 0, 1, 0, 0, 0.025,
+    [](double, double, double) {return false;}));
+}
+
+TEST(RotationSweep, FinalAlignmentNeverTakesLongDetour)
+{
+  EXPECT_FALSE(chooseRotation(0.12, [](double a) {return a < 0;}, false));
+  EXPECT_NEAR(*chooseRotation(2 * tai_robot_one::kPi - 0.12,
+    [](double) {return true;}, false), -0.12, 1e-9);
+}
+
+TEST(PathTracking, AdvancesBeforePlannedRightTurn)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {0, 0, 0}, {0.05, 0, 0}, {0.10, 0, 0}, {0.15, 0, 0},
+    {0.15, 0, -0.2}, {0.15, 0, -0.6}, {0.15, 0, -1.0},
+    {0.18, -0.05, -1.0}, {0.25, -0.15, -1.0}});
+  EXPECT_NEAR(target.initial_angle, 0, 1e-9);
+  EXPECT_NEAR(target.lookahead_limit, 0.15, 1e-9);
+  EXPECT_FALSE(target.at_turn);
+}
+
+TEST(PathTracking, RotatesOnlyAfterReachingPlannedTurnPoint)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {0.01, 0, 0}, {0.01, 0, -0.2}, {0.01, 0, -1.0}, {0.15, -0.2, -1.0}});
+  EXPECT_TRUE(target.at_turn);
+  EXPECT_NEAR(target.planned_turn, -1.0, 1e-9);
+}
+
+TEST(PathTracking, ReleasesAlignedTurnToResumeTranslation)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {0.01, 0, 1.0}, {0.01, 0, 0.2}, {0.01, 0, 0}, {0.2, 0, 0}});
+  EXPECT_FALSE(target.at_turn);
+  EXPECT_TRUE(std::isinf(target.lookahead_limit));
 }
