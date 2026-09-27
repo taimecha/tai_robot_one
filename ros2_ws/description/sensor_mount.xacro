@@ -11,16 +11,16 @@
     <xacro:property name="sensor_riser_width" value="${mast_profile}"/>
     <xacro:property name="sensor_mount_mass" value="0.200"/>
 
-    <!-- Both devices stand on the plate. The camera is farther forward (+X)
-         and its eye is 35 mm lower than the lidar scan plane. -->
+    <!-- The camera stands on this plate. Dimensions retain the optional
+         future high-LiDAR bracket; the current LiDAR sits on the chassis. -->
     <xacro:property name="camera_front_overhang" value="0.010"/>
     <!-- sensor_mount_link is on the aluminium-extrusion centreline. This puts
          the camera face exactly 10 mm ahead of the T8 support front face. -->
     <xacro:property name="camera_x_on_mount"
                     value="${guide_axis_x + shaft_support_depth / 2.0
                              + camera_front_overhang}"/>
-    <!-- Put the lidar behind the camera with a 4 mm physical gap between
-         their housings, while keeping both devices on the same plate. -->
+    <!-- Optional high mount places the lidar behind the camera with a 4 mm
+         physical gap between housings. -->
     <xacro:property name="sensor_housing_gap" value="0.004"/>
     <xacro:property name="lidar_x_on_mount"
                     value="${camera_x_on_mount - astra_depth
@@ -54,8 +54,8 @@
 
     <xacro:macro name="mast_sensor_mount"
                  params="parent include_lidar:=true camera_pitch:=0.0">
-        <!-- The mount frame lies on the laser scan plane. Because the mast is
-             fixed, lifting the fork carriage does not move either sensor. -->
+        <!-- This mount frame lies at the designed high scan plane. The mast
+             is fixed, so lifting the fork carriage does not move the camera. -->
         <joint name="sensor_mount_joint" type="fixed">
             <parent link="${parent}"/>
             <child link="sensor_mount_link"/>

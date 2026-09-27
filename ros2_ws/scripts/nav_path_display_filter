@@ -6,16 +6,21 @@ import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from nav_msgs.msg import Path
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
 
 class NavPathDisplayFilter(Node):
     def __init__(self):
         super().__init__('nav_path_display_filter')
         self._navigation_active = False
+        self._latest_global = None
+        global_topic = self.declare_parameter('global_path_topic', '/plan').value
 
         self._global_pub = self.create_publisher(Path, '/rviz/plan', 10)
         self._local_pub = self.create_publisher(Path, '/rviz/local_plan', 10)
-        self.create_subscription(Path, '/plan', self._relay_global, 10)
+        global_qos = QoSProfile(depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL) if global_topic == '/plan_selected' else 10
+        self.create_subscription(Path, global_topic, self._relay_global, global_qos)
         self.create_subscription(Path, '/local_plan', self._relay_local, 10)
         self.create_subscription(
             GoalStatusArray,
@@ -25,6 +30,7 @@ class NavPathDisplayFilter(Node):
         )
 
     def _relay_global(self, message):
+        self._latest_global = message
         if self._navigation_active:
             self._global_pub.publish(message)
 
@@ -40,11 +46,14 @@ class NavPathDisplayFilter(Node):
         }
         active = any(item.status in active_states for item in message.status_list)
 
+        if active and not self._navigation_active and self._latest_global is not None:
+            self._global_pub.publish(self._latest_global)
         if self._navigation_active and not active:
             self._clear_paths()
         self._navigation_active = active
 
     def _clear_paths(self):
+        self._latest_global = None
         stamp = self.get_clock().now().to_msg()
 
         global_path = Path()

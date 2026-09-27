@@ -8,8 +8,14 @@
     <xacro:property name="lidar_body_height" value="0.055"/>
     <xacro:property name="lidar_turret_radius" value="0.033"/>
     <xacro:property name="lidar_mass" value="0.170"/>
-    <!-- Measured on the real robot: ground to the centre of the laser eye. -->
+    <!-- Designed mast-bracket scan height; the installed real/simulated A1M8
+         currently uses the lower temporary chassis mount below. -->
     <xacro:property name="lidar_scan_height_ground" value="0.835"/>
+    <!-- Validated real-robot lidar extrinsic, shared with Gazebo. -->
+    <xacro:property name="lidar_installed_x" value="-0.2115"/>
+    <xacro:property name="lidar_installed_y" value="0.0"/>
+    <xacro:property name="lidar_installed_z" value="0.385"/>
+    <xacro:property name="lidar_installed_yaw" value="${-2.0 * pi / 180.0}"/>
 
     <material name="lidar_black">
         <color rgba="0.035 0.040 0.045 1"/>
@@ -79,8 +85,8 @@
                 <!-- Fixed joints are lumped into base_footprint by URDF->SDF.
                      Express the laser eye pose in that physics link. -->
                 <parent_link>base_footprint</parent_link>
-                <sensor_pose>${chassis_length / 2.0 + mast_profile / 2.0 + lidar_x_on_mount} 0
-                              ${lidar_scan_height_ground} 0 0 0</sensor_pose>
+                <sensor_pose>${lidar_installed_x} ${lidar_installed_y}
+                              ${lidar_installed_z} 0 0 ${lidar_installed_yaw}</sensor_pose>
                 <topic>/scan</topic>
                 <!-- Run the A1M8 at exactly 7 revolutions/second, within its
                      manufacturer-supported configurable scan-rate range. -->

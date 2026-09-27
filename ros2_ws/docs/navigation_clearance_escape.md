@@ -1,21 +1,69 @@
 # Real navigation: footprint clearance and continuous escape
 
-`nav_real.launch.py` selects `navigate_real_clearance_escape.xml` in normal
-mode. `motion_test:=true` keeps its separate diagnostic tree. The real-only
-VelocityStop override remains disabled; FootprintApproach and controller /
-BackUp collision checks remain enabled. Simulation keeps its existing tree.
+`nav_real.launch.py`, `nav_sim.launch.py` and `slam_nav_sim.launch.py` select
+the same `navigate_real_clearance_escape.xml` tree in normal mode.
+`motion_test:=true` on the real robot keeps its separate diagnostic tree.
+The simulation launches route Nav2's `/cmd_vel_safe` output to the simulated
+base and disable the `VelocityStop` polygon; `FootprintApproach` and the
+controller / BackUp collision checks remain enabled. The real launch keeps
+its own collision monitor settings.
 
-For a nearby goal (at most 75 cm, within 0.10 rad of forward), the real tree
-first tries a dense direct route from the actual pose to the exact requested
-goal. It checks the entire padded body, launch sweep and shortest terminal
-sweep against both costmaps; no initial map overlap is ignored. If feasible,
-its straight translation is the shortest XY route and avoids cell-grid kinks.
-For other goals / blocked direct routes the tree requests GridBased. A custom
-PathFootprintClear BT condition validates the actual published padded body /
-fork polygon along that path and at the initial and final heading sweeps.
-SE2Fallback searches orientation-aware alternatives when the XY route does
-not fit. A valid current path is retained instead of replaced every 2 seconds.
-This is a preference for short feasible routes, not a proof of global optimality.
+For a goal up to 6 m away, the real tree first tries a dense straight route
+from the actual pose to the exact requested goal. It includes a checked
+stationary turn onto the line when necessary and a checked final goal-yaw turn.
+It separately tries a tangent circular arc if the bearing is at most 0.80 rad,
+the turn radius is at least 0.90 m and the final heading correction is at most 1 rad.
+It checks the entire padded body, launch sweep and shortest terminal sweep
+against both costmaps; no initial map overlap is ignored. A blocked or
+ineligible line/arc falls through to the existing planners. These paths avoid
+cell-grid kinks and start turning while advancing when there is room.
+The tree compares the eligible Direct and DirectArc routes with GridBased, SE2Arc and
+SE2Fallback routes before moving. SE2Arc supplies continuous forward curves
+with a 0.60 m minimum turning radius; SE2Fallback supplies lattice paths with
+stationary turn primitives. Every candidate passes the full-body validator.
+`RankedRouteSearch` selects the shortest valid candidate and retains it while
+it remains usable. A reactive fresh-data/footprint guard checks during motion;
+a blocked route or geometric controller failure first requests fresh planning
+from the actual pose. Recovery also refreshes all candidates after a running
+route stops, rather than executing a longer route from an obsolete start pose.
+Successful FollowPath completion during recovery is remembered for that exact
+goal, so RecoveryNode's return to its primary does not send another FollowPath.
+The completion flag is cleared at the next tree execution. The goal checker
+is non-stateful: every success requires current XY and yaw within tolerance.
+The controller also rechecks XY during final yaw alignment and clears its
+arrival acceptance if the vehicle drifts out of tolerance. A checked final
+pivot finishes its yaw correction before correcting XY, so small localization
+or skid drift does not alternate the heading target every tick. Drift beyond
+15 cm rejects the pivot and requests fresh planning. After entering arrival,
+the controller can correct backward drift of at most 15 cm with a straight
+retreat at up to 0.08 m/s when lateral error is below 90% of XY tolerance and
+goal-yaw error is at most 0.35 rad. It stops angular motion first and checks
+the entire retreat corridor plus native collision projection before moving.
+This exception does not enable ordinary reverse path tracking.
+The final path pose uses a zero timestamp so goal acceptance follows current
+localization, rather than map-to-odom at the original request time; see
+[ControllerServer::isGoalReached](https://github.com/ros-navigation/navigation2/blob/jazzy/nav2_controller/src/controller_server.cpp).
+Quantized heading-aware endpoints are replaced with the exact requested pose
+before validation. An aligned lattice turn is released within 5 cm after skid
+turn drift, avoiding repeated attempts to revisit that already-completed cusp.
+At a running stationary-turn cusp, prepared-path validation advances past
+the old heading and checks the remaining sweep from the actual current yaw.
+It retains the forward prefix until the controller's 1.5 cm turn-entry threshold
+and still rejects long-way final alignment. Within the 4 cm XY tolerance,
+prepared-path checks validate the actual body and shortest final rotation at
+the accepted current XY, matching the non-stateful goal checker. They do not
+require another translation to the exact endpoint. This arrival phase requires
+at most 15 cm of route remaining: a checked departure from a nearby goal must
+finish its route before the controller latches final yaw. Complete checked
+route searches remain permitted near the goal; restricted local escape still
+requires more than 10 cm of goal distance.
+Candidate validation additionally checks goal-bearing and final-yaw turns at
+the first XY acceptance point and at 4 cm longitudinal/lateral tracking
+offsets when a substantial final turn remains. A nominal path that would trap
+the robot after a small tracking error is rejected before motion.
+A changed goal cancels the old action and compares routes from the actual pose.
+This finds the shortest of the validated candidates within the planning budget;
+it does not prove global optimality across all possible continuous trajectories.
 
 The condition uses both global and local raw costmaps near the robot, and the
 global costmap farther away. Samples are at most half a cell / 1 cm in combined
@@ -25,14 +73,75 @@ terminal rotations use only the shortest correction; initial rotations may
 try the other complete sweep. Recovery evaluates possible turns rather than intentionally rotating
 until contact or an emergency stop.
 
-After failure, recovery attempts a validated SE2 path and then a fresh
-validated GridBased path. It next searches complete routes from checked
+After failure, recovery compares fresh Direct, DirectArc, GridBased, SE2Arc and
+SE2Fallback candidates by length again. It next searches complete routes from checked
 forward starts before falling back to local manoeuvres. A distant footprint/
 terminal failure or occupied goal does NOT authorize unchecked local recovery
 motion. Start-occupied, near-body path
 collision and failed control/progress can authorize local escape; terminal
-alignment within 10 cm of the goal cannot. Error state is reset at the start
+alignment inside the 4 cm XY acceptance radius cannot. Within 25 cm of the
+goal, routes over 2.5 m are deferred while checked local escape is tried;
+they remain available as a last fallback. Error state is reset at the start
 of a new tree execution and before the recovery alternatives.
+For a goal 5–35 cm behind the robot, checked local escape may start even if
+the forward-only planners have no short route. It first requires 25 cm of
+measured, collision-checked rear travel before accepting a turn, so a brief
+in-place spin does not send the robot away from the nearby target.
+Forward-departure proposals are skipped for such a goal, so an apparently
+short path starting by driving farther away does not outrank the checked rear
+departure. Long forward routes remain a final fallback if no local exit fits.
+
+If the healthy recovery search is exhausted, the outer recovery allows two
+additional stopped planning cycles. Each waits 1.5 s for observations,
+invalidates the old path and replans from the actual pose. Motion history is
+retained, and sensor/TF/controller faults prevent these retries. This does
+not clear either costmap or claim exhaustive route search.
+
+## Compare departure manoeuvres before a long detour
+
+`RankedRouteSearch` first collects Direct, DirectArc, GridBased, SE2Arc and SE2Fallback.
+If no current-pose route fits, or the shortest exceeds `1.35 * straight_distance
++ 0.50 m` for a goal farther than 0.05 m, it also compares the complete routes
+from forward starts at 0.15, 0.30, ..., 1.20 m before ANY motion. Up to 28
+candidates plus nine goal-aligned approaches share a 20 s planning budget.
+The checked departure is part of
+both route length and footprint validation. Long routes remain eligible if no
+shorter departure manoeuvre fits. Ordinary short routes avoid the extra search.
+This prevents accepting a long forward-only Dubins loop solely because a
+safe short translation was never considered before recovery.
+
+On routes starting farther than 35 cm from the goal, a heading change over
+0.35 rad in the last 20 cm is rejected. That turn is too late for reliable
+arrival beside the rack; the earlier alignment candidates then compete by
+total path length. Short local corrections retain checked terminal turns.
+
+When this extended search is needed, it also asks all three native planners
+to reach a standoff 0.25, 0.50 or 0.75 m behind the requested goal along its
+final heading. The joined route explicitly aligns at that standoff and then
+advances straight to the exact goal. The entire connection, alignment sweep
+and final corridor must pass the same full-body checks. These candidates
+compete by total XY length with the other routes; there are at most 37 trials.
+This permits alignment before entering a tight goal region where the final
+pose fits but rotating after an angled arrival would collide.
+
+`/navigation/stationary_turn_limited` reports the controller's persistent
+stationary-turn guard. `route_control_available` skips futile FollowPath
+retries while that guard requires translation; checked local escape remains
+available. A measured 4 cm odometry displacement permits retry, matching the
+controller guard. An AMCL correction cannot grant that permission.
+
+When the reactive route guard cancels FollowPath first, its action error can
+still be zero. The explicit turn-limit signal therefore also authorizes checked
+local escape for a nonterminal goal, subject to the existing fault gates. A
+limited turn must translate before another Spin: an otherwise usable current
+turn no longer suppresses a checked forward pocket or checked rear corridor.
+The rear handoff uses the same measured 4 cm odometry threshold, so the latched
+controller signal need not wait for another FollowPath to release BackUp.
+A changed goal may reach setPlan() to reset the previous goal's controller limit.
+
+Tracking also selects the outgoing tangent only after skipping an aligned
+completed cusp. A slight lateral skid offset at that old cusp must not cause
+another heading correction toward a point behind or beside the robot.
 
 ## Ranked complete forward routes
 
@@ -40,8 +149,9 @@ of a new tree execution and before the recovery alternatives.
 While stopped, it proposes starts at 0.15, 0.30, ..., 1.20 m straight ahead,
 bounded by remaining goal distance and the fresh full-body global/local
 departure corridor. For each proposal the native ComputePathToPose action
-uses the explicit hypothetical start (`use_start=true`), first GridBased,
-then SE2Fallback if the complete GridBased route fails validation. The full
+uses the explicit hypothetical start (`use_start=true`) for ALL THREE of
+GridBased, SE2Arc and SE2Fallback: up to 24 routes, not the first successful
+planner at each start. The full
 departure from the actual current pose is prepended at 2.5 cm intervals;
 any quantized launch-heading correction is placed AT the future start.
 The entire joined route, including every rotation primitive and the exact
@@ -49,15 +159,17 @@ requested terminal pose, must pass PathFootprintClear before it is retained.
 Local observations cover the whole departure prefix even beyond one metre.
 Proposal checks issue no velocity or navigation actions.
 
-Retained candidates are ranked by path length plus 0.10 m per radian of total
-heading variation and 0.05 m per stop-to-turn manoeuvre. This strongly prefers
-short routes and fewer/smaller turns; it is not global shortest-path optimality
-or an exhaustive search of every possible position, heading or motion.
+Retained candidates are ranked by XY path length first. Only numerical length
+ties (0.1 mm buckets) use heading variation and stop-to-turn manoeuvres as a
+tiebreaker. A smoother long detour cannot outrank a genuinely shorter route.
+The ranking includes the full departure prefix. Costmap inflation costs inside
+the native planners continue to preserve clearance; this is candidate comparison,
+not an exhaustive geometric shortest-path search.
 The selected route is revalidated against current pose/maps before execution,
 and a reactive route/data guard continues checking while FollowPath runs.
-When it becomes blocked, or control reports patience/no-progress/no-valid-
-control, the next ranked route is revalidated from the new pose before it can
-run. Invalid alternatives are skipped, not executed. A running route stays
+In the shared navigation tree, blockage or control patience/no-progress/no-valid-
+control triggers fresh route comparison from the actual pose. Invalid
+alternatives are skipped. A running route stays
 selected; searching does not restart every controller tick. A changed goal or
 halt cancels the current planner/action and clears the search choices.
 
@@ -205,7 +317,7 @@ stationary-turn budget. A measured 4 cm translation clears that budget, includin
 after it was tripped. Final XY acceptance is latched while aligning heading;
 final turn tolerance is taken from the goal checker instead of hardcoded 2.6
 degrees. Final alignment recomputes the signed shortest angle every cycle and
-brakes before reversing angular direction. Goal acceptance remains 5 cm / 5 degrees.
+brakes before reversing angular direction. Goal acceptance is 4 cm / 5 degrees.
 Within 50 cm of the endpoint, alignment never selects a long opposite sweep;
 a blocked short turn requires another checked manoeuvre instead of a full lap.
 
@@ -398,3 +510,10 @@ anchor using the actual reverse heading. Build succeeded and all three
 selected CTest groups passed. The optional old capture replay was skipped
 because its capture is not present. No real motion goal or launch restart
 was performed for this revision; the operator must restart to load it.
+
+## Selected route visualization
+
+`/plan` contains the native planner trials. `/plan_selected` contains the
+body-checked winner sent to FollowPath. The normal real/simulation display
+relay subscribes to `/plan_selected` and clears `/rviz/plan` when navigation
+finishes; `motion_test` retains the native `/plan` display.

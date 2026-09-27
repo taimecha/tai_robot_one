@@ -58,6 +58,13 @@ TEST(PathPreference, PrefersShortRoutesAndLessTurning)
     routePreference({{0, 0, 0}, {2, 0, 0}}));
 }
 
+TEST(PathPreference, ShorterTurningRouteBeatsSlightlyLongerSmoothArc)
+{
+  // Earlier weighted penalties would send the vehicle around a long loop.
+  EXPECT_LT(tai_robot_one::routePreference({{0, 0, 0}, {0, 0, 3}, {1, 0, 3}, {1, 0, 0}}),
+    tai_robot_one::routePreference({{0, 0, 0}, {1.001, 0, 0}}));
+}
+
 TEST(PathPreference, RejectsEmptyOrNonFiniteRoutes)
 {
   EXPECT_FALSE(std::isfinite(tai_robot_one::routePreference({})));
@@ -211,4 +218,53 @@ TEST(PathTracking, ReleasesAlignedTurnToResumeTranslation)
     {0.01, 0, 1.0}, {0.01, 0, 0.2}, {0.01, 0, 0}, {0.2, 0, 0}});
   EXPECT_FALSE(target.at_turn);
   EXPECT_TRUE(std::isinf(target.lookahead_limit));
+}
+
+TEST(PathTracking, ReleasesAlignedTurnAfterSkidSteerPositionDrift)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {0.03, 0, -1.0}, {0.03, 0, 0.0}, {0.30, 0, 0.0}});
+  EXPECT_FALSE(target.at_turn);
+  EXPECT_TRUE(std::isinf(target.lookahead_limit));
+}
+
+TEST(PathTracking, CompletedTurnBehindRobotUsesOutgoingTangent)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {-.03, 0, 1.2}, {-.03, 0, .6}, {-.03, 0, 0},
+    {.02, .003, 0}, {.12, .009, 0}});
+  EXPECT_FALSE(target.at_turn);
+  EXPECT_TRUE(std::isinf(target.lookahead_limit));
+  EXPECT_NEAR(target.initial_angle, std::atan2(.003, .05), 1e-9);
+}
+
+TEST(PathTracking, ReleasedTurnWithLateralSkidDriftDoesNotStartAnotherSpin)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {-.02, .04, 1.2}, {-.02, .04, .6}, {-.02, .04, 0},
+    {.03, .04, 0}, {.08, .04, 0}});
+  EXPECT_FALSE(target.at_turn);
+  EXPECT_NEAR(target.initial_angle, 0, 1e-9);
+}
+
+TEST(PathTracking, ReleasedTurnDoesNotAimBackAtOldCuspBeforeNextTurn)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {-.04, -.01, 1.0}, {-.04, -.01, 0}, {.20, -.01, 0},
+    {.20, -.01, -.7}, {.30, -.12, -.7}});
+  EXPECT_FALSE(target.at_turn);
+  EXPECT_NEAR(target.initial_angle, 0, 1e-9);
+  EXPECT_NEAR(target.lookahead_limit, std::hypot(.20, .01), 1e-9);
+}
+
+TEST(PathTracking, TerminalRetreatRequiresPriorArrivalAndAlignedShortCorridor)
+{
+  using tai_robot_one::terminalReverseCorrectionAllowed;
+  EXPECT_TRUE(terminalReverseCorrectionAllowed(-.10, -.02, .03, .04, .08, true));
+  EXPECT_FALSE(terminalReverseCorrectionAllowed(-.10, -.02, .03, .04, .08, false));
+  EXPECT_FALSE(terminalReverseCorrectionAllowed(-.10, -.02, .30, .04, .08, true));
+  EXPECT_FALSE(terminalReverseCorrectionAllowed(-.20, -.02, .03, .04, .08, true));
+  EXPECT_FALSE(terminalReverseCorrectionAllowed(-.10, -.05, .03, .04, .08, true));
+  EXPECT_FALSE(terminalReverseCorrectionAllowed(-.10, -.02, .03, .04, .70, true));
+  EXPECT_FALSE(terminalReverseCorrectionAllowed(.10, -.02, .03, .04, .08, true));
 }

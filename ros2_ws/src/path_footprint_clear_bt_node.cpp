@@ -14,6 +14,7 @@
 #include <behaviortree_cpp/bt_factory.h>
 #include <geometry_msgs/msg/polygon_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <nav2_msgs/msg/costmap.hpp>
 #include <nav2_msgs/action/spin.hpp>
 #include <nav2_msgs/action/back_up.hpp>
@@ -48,6 +49,13 @@ struct ClearanceData
       "footprint_route_check_" + std::to_string(sequence++), options);
     executor.add_node(node);
     const auto qos = rclcpp::QoS(1).reliable().transient_local();
+    selected_route_pub = node->create_publisher<nav_msgs::msg::Path>("/plan_selected", qos);
+    turn_limit_sub = node->create_subscription<std_msgs::msg::Bool>(
+      "/navigation/stationary_turn_limited", qos,
+      [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+        if (msg->data != turn_limited) {turn_limit_anchor_valid = false;}
+        turn_limited = msg->data;
+      });
     global_sub = node->create_subscription<nav2_msgs::msg::Costmap>(
       "/global_costmap/costmap_raw", qos,
       [this](nav2_msgs::msg::Costmap::ConstSharedPtr msg) {global = msg;});
@@ -59,6 +67,25 @@ struct ClearanceData
       [this](geometry_msgs::msg::PolygonStamped::ConstSharedPtr msg) {footprint = msg;});
   }
   rclcpp::Node::SharedPtr node;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr selected_route_pub;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr turn_limit_sub;
+  bool turn_limited{false}, turn_limit_anchor_valid{false};
+  double turn_limit_odom_x{0.0}, turn_limit_odom_y{0.0};
+  geometry_msgs::msg::PoseStamped route_goal;
+  bool route_goal_valid{false};
+  geometry_msgs::msg::PoseStamped completed_goal;
+  bool completed_goal_valid{false};
+  bool turnTranslationRequired(double odom_x, double odom_y)
+  {
+    if (!turn_limited) {return false;}
+    if (!turn_limit_anchor_valid) {
+      turn_limit_odom_x = odom_x;
+      turn_limit_odom_y = odom_y;
+      turn_limit_anchor_valid = true;
+    }
+    return std::hypot(odom_x - turn_limit_odom_x, odom_y - turn_limit_odom_y) <
+           StationaryTurnGuard::kResetTranslation;
+  }
   rclcpp::executors::SingleThreadedExecutor executor;
   nav2_msgs::msg::Costmap::ConstSharedPtr global, local;
   geometry_msgs::msg::PolygonStamped::ConstSharedPtr footprint;
@@ -74,6 +101,9 @@ struct ClearanceData
   bool retreat_active{false}, retreat_stopped{false};
   geometry_msgs::msg::PoseStamped retreat_goal;
   double retreat_x{0.0}, retreat_y{0.0}, retreat_yaw{0.0};
+  bool near_goal_reverse_pending{false}, near_goal_reverse_done{false};
+  double near_goal_reverse_x{0.0}, near_goal_reverse_y{0.0};
+  double near_goal_reverse_yaw{0.0};
   bool forward_active{false}, forward_geometric_stop{false};
   geometry_msgs::msg::PoseStamped forward_goal;
   double forward_x{0.0}, forward_y{0.0}, forward_yaw{0.0}, forward_distance{0.0};
@@ -109,14 +139,16 @@ public:
       BT::InputPort<nav_msgs::msg::Path>("path"),
       BT::InputPort<bool>("data_only", false, "Check sensor/TF readiness without checking a path"),
       BT::InputPort<std::string>("motion", "path",
-          "path/direct/forward/turn/turn_collision/reverse_needed/escape_available/"
-          "recovery_allowed/replan_after_retreat/forward_candidate/forward_route/motion_fault_free/"
-          "forward_begin/forward_safe/forward_complete/forward_collision/turn_begin/lost_exit"),
+          "path/direct/direct_arc/forward/turn/turn_collision/reverse_needed/escape_available/"
+          "recovery_allowed/replan_after_retreat/forward_candidate/forward_route/"
+          "goal_approach_candidate/approach_route/motion_fault_free/"
+          "forward_begin/forward_safe/forward_complete/forward_collision/turn_begin/lost_exit/route_control_available/goal_completed"),
       BT::InputPort<geometry_msgs::msg::PoseStamped>("goal"),
       BT::InputPort<double>("candidate_distance", 0.15, "Forward route search distance"),
       BT::InputPort<double>("candidate_angle", 0.0, "Selected checked recovery turn"),
       BT::InputPort<geometry_msgs::msg::PoseStamped>("candidate_start"),
       BT::InputPort<double>("local_check_distance", 1.0, "Radius requiring live local checks"),
+      BT::InputPort<double>("goal_xy_tolerance", 0.04, "Match the shared goal checker XY tolerance"),
       BT::InputPort<uint16_t>("planner_error", uint16_t{0}, "Planner result code"),
       BT::InputPort<uint16_t>("controller_error", uint16_t{0}, "Controller result code"),
       BT::InputPort<uint16_t>("motion_error", uint16_t{0}, "Motion action result code"),
@@ -129,12 +161,26 @@ public:
       BT::OutputPort<bool>("blocked_near_robot"),
       BT::OutputPort<double>("forward_distance"),
       BT::OutputPort<geometry_msgs::msg::PoseStamped>("forward_start"),
+      BT::OutputPort<geometry_msgs::msg::PoseStamped>("approach_goal"),
       BT::OutputPort<double>("turn_angle")
     };
   }
 
   BT::NodeStatus tick() override
   {
+    if (getInput<std::string>("motion").value() == "goal_completed") {
+      geometry_msgs::msg::PoseStamped goal;
+      if (!data_->completed_goal_valid || !getInput("goal", goal)) {
+        return BT::NodeStatus::FAILURE;
+      }
+      const auto & done = data_->completed_goal;
+      return goal.header.frame_id == done.header.frame_id &&
+             std::hypot(goal.pose.position.x - done.pose.position.x,
+             goal.pose.position.y - done.pose.position.y) < 1e-6 &&
+             std::abs(wrapAngle(tf2::getYaw(goal.pose.orientation) -
+             tf2::getYaw(done.pose.orientation))) < 1e-6 ?
+             BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+    }
     data_->executor.spin_some();
     global_ = data_->global;
     local_ = data_->local;
@@ -177,22 +223,54 @@ public:
       (void)getInput("data_only", data_only);
       if (data_only) {return BT::NodeStatus::SUCCESS;}
       const auto motion = getInput<std::string>("motion").value();
+      const double goal_xy_tolerance = getInput<double>("goal_xy_tolerance").value();
+      if (!std::isfinite(goal_xy_tolerance) || goal_xy_tolerance < .01 ||
+        goal_xy_tolerance > .20) {return BT::NodeStatus::FAILURE;}
+      if (motion == "route_control_available") {
+        geometry_msgs::msg::PoseStamped goal;
+        if (getInput("goal", goal)) {
+          if (data_->route_goal_valid &&
+            (goal.header.frame_id != data_->route_goal.header.frame_id ||
+            std::hypot(goal.pose.position.x - data_->route_goal.pose.position.x,
+            goal.pose.position.y - data_->route_goal.pose.position.y) > 1e-6 ||
+            std::abs(wrapAngle(tf2::getYaw(goal.pose.orientation) -
+            tf2::getYaw(data_->route_goal.pose.orientation))) > 1e-6))
+          {
+            // A new goal is allowed to reach setPlan(), which resets the
+            // controller guard. A previous aborted goal must not lock it out.
+            data_->turn_limited = false;
+            data_->turn_limit_anchor_valid = false;
+          }
+          data_->route_goal = goal;
+          data_->route_goal_valid = true;
+        }
+        const auto & odom = odom_robot.transform.translation;
+        // FollowPath cannot clear its persistent turn guard without actual
+        // translation. Route retries at the same pose are futile. Let the
+        // checked DriveOnHeading/BackUp escape move before retrying paths.
+        return data_->turnTranslationRequired(odom.x, odom.y) ?
+          BT::NodeStatus::FAILURE : BT::NodeStatus::SUCCESS;
+      }
       const bool direct = motion == "direct";
+      const bool direct_arc = motion == "direct_arc";
+      const bool geometric_direct = direct || direct_arc;
       const bool forward_route = motion == "forward_route";
-      const bool path_query = motion == "path" || direct || forward_route;
+      const bool approach_route = motion == "approach_route";
+      const bool path_query = motion == "path" || geometric_direct ||
+        forward_route || approach_route;
       const double requested_range = getInput<double>("local_check_distance").value();
       if (!std::isfinite(requested_range) || requested_range < 1.0 || requested_range > 1.30) {
         return BT::NodeStatus::FAILURE;
       }
       double local_range = requested_range;
       nav_msgs::msg::Path path;
-      if ((motion == "path" || forward_route) &&
+      if ((motion == "path" || forward_route || approach_route) &&
         (!getInput("path", path) || path.poses.empty() ||
         path.header.frame_id != global_->header.frame_id))
       {
         return BT::NodeStatus::FAILURE;
       }
-      if (direct) {
+      if (geometric_direct) {
         geometry_msgs::msg::PoseStamped goal;
         if (!getInput("goal", goal) || goal.header.frame_id != global_->header.frame_id) {
           return BT::NodeStatus::FAILURE;
@@ -202,9 +280,22 @@ public:
         const double dy = goal.pose.position.y - start.position.y;
         const double distance = std::hypot(dx, dy);
         const double yaw = tf2::getYaw(start.orientation);
-        const double heading = distance <= 0.05 ? yaw : std::atan2(dy, dx);
-        if (!std::isfinite(distance) || distance > 0.75 ||
-          std::abs(wrapAngle(heading - yaw)) > 0.10)
+        const double heading = distance <= goal_xy_tolerance ? yaw : std::atan2(dy, dx);
+        const double bearing = wrapAngle(heading - yaw);
+        // The shortest XY route is a straight line. Its initial and terminal
+        // turns are explicit zero-translation cusps and are checked with the
+        // whole body below. Keep a tangent arc as a separate candidate when
+        // a safe turn in place is unavailable or its motion is preferable.
+        const double radius = std::abs(bearing) > 1e-6 ?
+          distance / (2.0 * std::sin(std::abs(bearing))) :
+          std::numeric_limits<double>::infinity();
+        const double arrival_yaw = yaw + 2.0 * bearing;
+        const double terminal_error = std::abs(wrapAngle(
+          tf2::getYaw(goal.pose.orientation) - arrival_yaw));
+        const bool arc = direct_arc && std::abs(bearing) > 0.035 &&
+          std::abs(bearing) <= 0.80 &&
+          radius >= 0.90 && terminal_error <= 1.0;
+        if (!std::isfinite(distance) || distance > 6.0 || (direct_arc && !arc))
         {
           return BT::NodeStatus::FAILURE;
         }
@@ -212,30 +303,43 @@ public:
         auto first = map_pose;
         first.header = path.header;
         path.poses.push_back(first);
-        if (std::abs(wrapAngle(heading - yaw)) > 1e-6) {
+        if (direct && distance > goal_xy_tolerance && std::abs(bearing) > 0.035) {
           auto aligned = first;
-          aligned.pose.orientation.x = aligned.pose.orientation.y = 0.0;
           aligned.pose.orientation.z = std::sin(heading / 2);
           aligned.pose.orientation.w = std::cos(heading / 2);
           path.poses.push_back(aligned);
         }
-        // Dense points keep pruning/initial alignment from treating the old
-        // start point behind a moving vehicle as a new 180-degree target.
-        const int samples = std::max(1, static_cast<int>(std::ceil(distance / 0.025)));
+        // Dense samples preserve the intended tangent through path pruning
+        // and let the existing validator check the entire body on the arc.
+        const double sweep = arc ? 2.0 * bearing : 0.0;
+        const double length = arc ? radius * std::abs(sweep) : distance;
+        const int samples = std::max(1, static_cast<int>(std::ceil(length / 0.025)));
         for (int i = 1; i < samples; ++i) {
           auto point = first;
           const double t = static_cast<double>(i) / samples;
-          point.pose.position.x += t * dx;
-          point.pose.position.y += t * dy;
+          double tangent = heading;
+          if (arc) {
+            const double a = sweep * t;
+            const double signed_radius = std::copysign(radius, bearing);
+            point.pose.position.x += signed_radius *
+              (std::sin(yaw + a) - std::sin(yaw));
+            point.pose.position.y += signed_radius *
+              (std::cos(yaw) - std::cos(yaw + a));
+            tangent = yaw + a;
+          } else {
+            point.pose.position.x += t * dx;
+            point.pose.position.y += t * dy;
+          }
           point.pose.orientation.x = point.pose.orientation.y = 0.0;
-          point.pose.orientation.z = std::sin(heading / 2);
-          point.pose.orientation.w = std::cos(heading / 2);
+          point.pose.orientation.z = std::sin(tangent / 2);
+          point.pose.orientation.w = std::cos(tangent / 2);
           path.poses.push_back(point);
         }
         path.poses.push_back(goal);
       }
       if (path_query) {
-        const auto planner_id = direct ? std::string("Direct") :
+        const auto planner_id = geometric_direct ?
+          std::string(direct ? "Direct" : "DirectArc") :
           getInput<std::string>("planner_id").value();
         if (planner_id == "GridBased" && !getInput<bool>("prepared").value()) {
           // Smac2D short paths can contain default/identity quaternions.
@@ -249,7 +353,8 @@ public:
             p.pose.position.y += half_cell;
           }
           geometry_msgs::msg::PoseStamped goal;
-          if (getInput("goal", goal) && goal.header.frame_id == path.header.frame_id) {
+          if (approach_route) {(void)getInput("candidate_start", goal);}
+          if ((approach_route || getInput("goal", goal)) && goal.header.frame_id == path.header.frame_id) {
             // Acceptance must be measured against the requested goal, not
             // Smac2D's discretized map-cell corner (up to a cell away).
             // The complete validator below still rejects an unsafe endpoint.
@@ -265,6 +370,20 @@ public:
               q.x = q.y = 0.0; q.z = std::sin(a / 2); q.w = std::cos(a / 2);
               break;
             }
+          }
+        }
+        if (!geometric_direct && planner_id != "GridBased" &&
+          !getInput<bool>("prepared").value()) {
+          geometry_msgs::msg::PoseStamped goal;
+          if (approach_route) {(void)getInput("candidate_start", goal);}
+          if ((approach_route || getInput("goal", goal)) && goal.header.frame_id == path.header.frame_id) {
+            const auto & end = path.poses.back().pose.position;
+            if (std::hypot(end.x - goal.pose.position.x, end.y - goal.pose.position.y) > 0.075) {
+              return BT::NodeStatus::FAILURE;
+            }
+            // Lattice/hybrid endpoints are quantized too. Validate and follow
+            // the requested XY/yaw, including its final short rotation.
+            path.poses.back().pose = goal.pose;
           }
         }
         if (forward_route) {
@@ -311,6 +430,39 @@ public:
           path = std::move(joined);
           local_range = std::max(1.0, advance + 0.05);
         }
+        if (approach_route) {
+          geometry_msgs::msg::PoseStamped approach, goal;
+          if (!getInput("candidate_start", approach) || !getInput("goal", goal) ||
+            approach.header.frame_id != path.header.frame_id ||
+            goal.header.frame_id != path.header.frame_id || path.poses.size() < 2)
+          {return BT::NodeStatus::FAILURE;}
+          const double d = std::hypot(goal.pose.position.x - approach.pose.position.x,
+            goal.pose.position.y - approach.pose.position.y);
+          const double a = tf2::getYaw(goal.pose.orientation);
+          if (d < .24 || d > .76 ||
+            std::abs(wrapAngle(tf2::getYaw(approach.pose.orientation) - a)) > .01 ||
+            std::hypot(approach.pose.position.x + d * std::cos(a) - goal.pose.position.x,
+            approach.pose.position.y + d * std::sin(a) - goal.pose.position.y) > .01)
+          {return BT::NodeStatus::FAILURE;}
+          // Reach a clear standoff, align HERE, then advance to the exact goal.
+          // This explicit cusp is also enforced by the controller's tracker.
+          auto entry = path.poses.back();
+          entry.pose.orientation = path.poses[path.poses.size() - 2].pose.orientation;
+          path.poses.insert(path.poses.end() - 1, entry);
+          const int n = static_cast<int>(std::ceil(d / .025));
+          for (int i = 1; i <= n; ++i) {
+            auto p = goal;
+            const double remaining = d * (1.0 - static_cast<double>(i) / n);
+            p.pose.position.x -= remaining * std::cos(a);
+            p.pose.position.y -= remaining * std::sin(a);
+            path.poses.push_back(p);
+          }
+        }
+        // ControllerServer transforms end_pose_ using its stamp on every
+        // goal check. The request's old stamp would freeze map->odom at launch
+        // while RPP tracks with current localization. Use latest localization
+        // for goal acceptance, consistently with path validation and tracking.
+        path.poses.back().header.stamp = builtin_interfaces::msg::Time{};
         setOutput("checked_path", path);
         setOutput("path_planner", planner_id);
       }
@@ -339,6 +491,102 @@ public:
           }
           return false;
         };
+      if (path_query && !getInput<bool>("prepared").value() && path.poses.size() >= 2) {
+        // SimpleGoalChecker accepts XY as soon as the robot enters its disk.
+        // Check the final yaw sweep THERE, not only at the exact goal
+        // cell; a tangent arrival can fit at the endpoint yet become trapped
+        // at the first accepted XY.
+        const auto & end = path.poses.back().pose;
+        const double gx = end.position.x, gy = end.position.y;
+        const double goal_yaw = tf2::getYaw(end.orientation);
+        // A large heading change in the final 20 cm is fragile on this
+        // skid-steer base: a few centimetres of drift then demand a blocked
+        // point turn at the rack. Align earlier and enter on the goal heading.
+        if (!direct && std::hypot(path.poses.front().pose.position.x - gx,
+            path.poses.front().pose.position.y - gy) > .35)
+        {
+          for (size_t i = path.poses.size() - 1; i-- > 0;) {
+            const auto & p = path.poses[i].pose;
+            if (std::hypot(p.position.x - gx, p.position.y - gy) < .20) {continue;}
+            if (std::abs(wrapAngle(goal_yaw - tf2::getYaw(p.orientation))) > .35) {
+              RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 3000,
+                "Route changes heading too much in final 20 cm; compare aligned approaches");
+              return BT::NodeStatus::FAILURE;
+            }
+            break;
+          }
+        }
+        bool outside = std::hypot(path.poses.front().pose.position.x - gx,
+            path.poses.front().pose.position.y - gy) > goal_xy_tolerance + .005;
+        for (size_t i = 1; i < path.poses.size(); ++i) {
+          const auto & a = path.poses[i - 1].pose;
+          const auto & b = path.poses[i].pose;
+          const double dx = b.position.x - a.position.x;
+          const double dy = b.position.y - a.position.y;
+          const int n = std::max(1, static_cast<int>(std::ceil(std::hypot(dx, dy) / .01)));
+          bool entered = false;
+          for (int j = 1; j <= n; ++j) {
+            const double t = static_cast<double>(j) / n;
+            const double px = a.position.x + t * dx;
+            const double py = a.position.y + t * dy;
+            const double radius = std::hypot(px - gx, py - gy);
+            if (radius > goal_xy_tolerance + .005) {outside = true;}
+            if (!outside || radius > goal_xy_tolerance - .002) {continue;}
+            const double approach_yaw = tf2::getYaw(a.orientation);
+            const double sweep = wrapAngle(goal_yaw - approach_yaw);
+            auto alignment_clear = [&](double cx, double cy) {
+                const double remaining = std::hypot(gx - cx, gy - cy);
+                const double target = remaining > goal_xy_tolerance ?
+                  std::atan2(gy - cy, gx - cx) : goal_yaw;
+                return rotationSweepClear(approach_yaw,
+                  wrapAngle(target - approach_yaw),
+                  [&](double heading) {return collision(cx, cy, heading);});
+              };
+            bool clear = alignment_clear(px, py);
+            if (clear && std::abs(sweep) > .15) {
+              // Allow for a few centimetres of path-tracking error before
+              // entering the XY tolerance. This only tightens
+              // candidates that still require a substantial final turn.
+              const double nx = -std::sin(approach_yaw);
+              const double ny = std::cos(approach_yaw);
+              for (double back : {0.0, .04}) {
+                for (double lateral : {-.04, .04}) {
+                  clear = clear && alignment_clear(
+                    px - back * std::cos(approach_yaw) + lateral * nx,
+                    py - back * std::sin(approach_yaw) + lateral * ny);
+                }
+              }
+            }
+            if (!clear)
+            {
+              RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 3000,
+                "First accepted XY cannot align goal yaw at (%.3f, %.3f)", px, py);
+              setOutput("blocked_near_robot", std::hypot(px - x, py - y) < 1.0);
+              return BT::NodeStatus::FAILURE;
+            }
+            entered = true;
+            break;
+          }
+          if (entered) {break;}
+        }
+      }
+      if (motion == "goal_approach_candidate") {
+        geometry_msgs::msg::PoseStamped goal;
+        const double d = getInput<double>("candidate_distance").value();
+        if (!getInput("goal", goal) || goal.header.frame_id != global_->header.frame_id ||
+          !std::isfinite(d) || d < .25 || d > .75)
+        {return BT::NodeStatus::FAILURE;}
+        auto approach = goal;
+        const double a = tf2::getYaw(goal.pose.orientation);
+        approach.pose.position.x -= d * std::cos(a);
+        approach.pose.position.y -= d * std::sin(a);
+        if (!poseSegmentClear(approach.pose.position.x, approach.pose.position.y, a,
+            goal.pose.position.x, goal.pose.position.y, a,
+            global_map->getResolution(), collision))
+        {return BT::NodeStatus::FAILURE;}
+        setOutput("approach_goal", approach);
+        return BT::NodeStatus::SUCCESS;
+      }
       if (!path_query) {
         return checkManeuver(motion, x, y, yaw, ta, tx, ty, body, gc, lc);
       }
@@ -351,8 +599,52 @@ public:
         const double d = std::hypot(p.x - x, p.y - y);
         if (d < distance) {distance = d; nearest = i;}
       }
+      double remaining_length = 0.0;
+      for (size_t i = nearest + 1; i < path.poses.size(); ++i) {
+        const auto & a = path.poses[i - 1].pose.position;
+        const auto & b = path.poses[i].pose.position;
+        remaining_length += std::hypot(b.x - a.x, b.y - a.y);
+      }
+      if (getInput<bool>("prepared").value()) {
+        const auto & goal = path.poses.back().pose;
+        if (remaining_length <= 0.15 &&
+          std::hypot(goal.position.x - x, goal.position.y - y) <= goal_xy_tolerance)
+        {
+          // The controller aligns at the accepted current XY. Do not require
+          // an extra translation to the exact endpoint after entering tolerance.
+          const bool clear = !collision(x, y, yaw) && rotationSweepClear(yaw,
+            wrapAngle(tf2::getYaw(goal.orientation) - yaw),
+            [&](double a) {return collision(x, y, a);});
+          setOutput("blocked_near_robot", !clear);
+          return clear ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+        }
+      }
+      if (getInput<bool>("prepared").value() && distance <= 0.015) {
+        // At a stationary-turn cusp, only the REMAINING sweep is relevant.
+        // A nearest-XY tie otherwise chooses the pre-turn heading and asks
+        // validation to sweep back through already-completed orientations.
+        // Match the controller's 1.5 cm turn-entry threshold; farther away,
+        // preserve the forward departure before any rotation is permitted.
+        while (nearest + 1 < path.poses.size() &&
+          std::hypot(path.poses[nearest + 1].pose.position.x -
+          path.poses[nearest].pose.position.x, path.poses[nearest + 1].pose.position.y -
+          path.poses[nearest].pose.position.y) < 0.005)
+        {
+          ++nearest;
+        }
+      }
       const auto & first = path.poses[nearest].pose;
       const double first_yaw = tf2::getYaw(first.orientation);
+      double launch_yaw = first_yaw;
+      if (getInput<bool>("prepared").value() && nearest + 1 == path.poses.size()) {
+        // The closest point can be the goal while still outside XY tolerance.
+        // FollowPath approaches it first; the final goal yaw must not become
+        // a premature in-place rotation at the current, offset position.
+        const double remaining = std::hypot(first.position.x - x, first.position.y - y);
+        if (remaining > goal_xy_tolerance) {
+          launch_yaw = std::atan2(first.position.y - y, first.position.x - x);
+        }
+      }
       bool starts_forward = false;
       for (size_t i = nearest + 1; i < path.poses.size(); ++i) {
         const auto & p = path.poses[i].pose.position;
@@ -367,7 +659,16 @@ public:
           break;
         }
       }
-      if (!direct && starts_forward && !occupied(lc,
+      if (getInput<bool>("prepared").value() && nearest + 1 == path.poses.size()) {
+        const auto & p = path.poses.back().pose.position;
+        const double dx = p.x - x, dy = p.y - y;
+        // Match the controller's short terminal tracking phase. The full
+        // translation and final sweep below must still fit before proceeding.
+        starts_forward = canApproachGoalWithoutStationaryTurn(
+          dx * std::cos(yaw) + dy * std::sin(yaw),
+          -dx * std::sin(yaw) + dy * std::cos(yaw), remaining_length, goal_xy_tolerance);
+      }
+      if (!geometric_direct && starts_forward && !occupied(lc,
           tx + std::cos(ta) * x - std::sin(ta) * y,
           ty + std::sin(ta) * x + std::cos(ta) * y, yaw + ta, body))
       {
@@ -406,15 +707,15 @@ public:
           }
         }
       }
-      if (!starts_forward && !chooseRotation(wrapAngle(first_yaw - yaw), [&](double sweep) {
+      if (!starts_forward && !chooseRotation(wrapAngle(launch_yaw - yaw), [&](double sweep) {
           return rotationSweepClear(yaw, sweep, [&](double a) {
                    return collision(x, y, a);
           });
-        }))
+        }, nearest + 1 < path.poses.size()))
       {
         RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 3000,
           "Initial footprint rotation blocked at (%.3f, %.3f), angle %.1f deg",
-          x, y, wrapAngle(first_yaw - yaw) * 180.0 / kPi);
+          x, y, wrapAngle(launch_yaw - yaw) * 180.0 / kPi);
         setOutput("blocked_near_robot", true);
         return BT::NodeStatus::FAILURE;
       }
@@ -423,7 +724,7 @@ public:
       // Heading quantization (e.g. 99 deg robot vs 90 deg lattice) does not
       // require a launch spin when the controller can align while advancing.
       // Check that coupled motion from the real current yaw instead.
-      double px = x, py = y, pa = starts_forward ? yaw : first_yaw;
+      double px = x, py = y, pa = starts_forward ? yaw : launch_yaw;
       if (collision(x, y, yaw)) {
         setOutput("blocked_near_robot", true);
         return BT::NodeStatus::FAILURE;
@@ -489,6 +790,7 @@ private:
           tf2::getYaw(previous.pose.orientation))) < 1e-6;
       };
     if (!same_goal(data_->turn_goal)) {
+      data_->near_goal_reverse_pending = data_->near_goal_reverse_done = false;
       data_->turn_attempts.clear();
       data_->escape_memory.reset();
       data_->turn_geometric_stop = data_->selected_turn_goal_facing = false;
@@ -551,17 +853,47 @@ private:
       const bool healthy = controller == 0 || controller == 104 ||
         controller == 105 || controller == 106;
       if (mode == "motion_fault_free") {
-        return healthy && std::hypot(goal.pose.position.x - x,
-          goal.pose.position.y - y) > 0.10 ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
+        // This gate permits complete checked route searches, not local escape.
+        // A close goal may need alignment before returning to its final pose.
+        return healthy ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
       }
-      const bool permitted = healthy && std::hypot(goal.pose.position.x - x,
-          goal.pose.position.y - y) > 0.10 &&
-        (planner == 205 || (planner == 0 && (near || controller == 104 ||
-        controller == 105 || controller == 106)));
+      const double dx = goal.pose.position.x - x;
+      const double dy = goal.pose.position.y - y;
+      const double goal_distance = std::hypot(dx, dy);
+      // A very close goal behind the current heading can require a checked
+      // rear departure before any forward-only planner finds a short route.
+      // A bounded planner search timeout is not a sensor/TF fault. The rear
+      // corridor still needs a fresh full-body check before any movement.
+      const bool close_behind = goal_distance > .05 && goal_distance < .35 &&
+        dx * std::cos(yaw) + dy * std::sin(yaw) < -.04 &&
+        (planner == 0 || planner == 205 || planner == 207 || planner == 208);
+      const bool permitted = healthy && goal_distance > 0.05 &&
+        (close_behind || planner == 205 || (planner == 0 &&
+        (near || controller == 104 || controller == 105 ||
+        controller == 106 || data_->turn_limited)));
+      if (!permitted && goal_distance > .05 && goal_distance < .35 &&
+        dx * std::cos(yaw) + dy * std::sin(yaw) < -.04)
+      {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 3000,
+          "Near-behind escape unavailable: planner=%u controller=%u local_blocked=%d",
+          planner, controller, near);
+      }
+      if (permitted && close_behind && !data_->near_goal_reverse_done &&
+        !data_->near_goal_reverse_pending)
+      {
+        data_->near_goal_reverse_pending = true;
+        data_->near_goal_reverse_x = tx + std::cos(ta) * x - std::sin(ta) * y;
+        data_->near_goal_reverse_y = ty + std::sin(ta) * x + std::cos(ta) * y;
+        data_->near_goal_reverse_yaw = yaw + ta;
+        ++data_->motion_revision;
+        RCLCPP_INFO(node_->get_logger(),
+          "Near goal behind: check rear travel before choosing a turn");
+      }
       return permitted ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
     }
     const double odom_x = tx + std::cos(ta) * x - std::sin(ta) * y;
     const double odom_y = ty + std::sin(ta) * x + std::cos(ta) * y;
+    const bool translation_required = data_->turnTranslationRequired(odom_x, odom_y);
     if (data_->escape_memory.observe(odom_x, odom_y)) {
       ++data_->motion_revision;
       RCLCPP_INFO(node_->get_logger(), "Escape reached a different odometry region; reconsider exits");
@@ -692,13 +1024,28 @@ private:
     // The attempted heading is excluded by useful_exit. Another fully checked
     // turn can execute immediately; only an unrecorded collision result needs
     // the conservative measured retreat before selecting a turn again.
-    const bool force_retreat = data_->turn_collision && !recorded_turn_here &&
-      retreat < data_->collision_min_retreat;
+    if (data_->near_goal_reverse_pending) {
+      const double rear_travel = -(
+        (odom_x - data_->near_goal_reverse_x) * std::cos(data_->near_goal_reverse_yaw) +
+        (odom_y - data_->near_goal_reverse_y) * std::sin(data_->near_goal_reverse_yaw));
+      if (rear_travel >= .25) {
+        data_->near_goal_reverse_pending = false;
+        data_->near_goal_reverse_done = true;
+        ++data_->motion_revision;
+      }
+    }
+    const bool force_retreat = data_->near_goal_reverse_pending ||
+      (data_->turn_collision && !recorded_turn_here &&
+      retreat < data_->collision_min_retreat);
     if (mode == "forward_candidate") {
       const double d = getInput<double>("candidate_distance").value();
-      const double goal_distance = std::hypot(goal.pose.position.x - x,
-        goal.pose.position.y - y);
-      if (force_retreat || data_->escape_memory.committed || !std::isfinite(goal_distance) ||
+      const double dx = goal.pose.position.x - x;
+      const double dy = goal.pose.position.y - y;
+      const double goal_distance = std::hypot(dx, dy);
+      const bool close_behind = goal_distance < .35 &&
+        dx * std::cos(yaw) + dy * std::sin(yaw) < -.04;
+      if (close_behind || force_retreat || data_->escape_memory.committed ||
+        !std::isfinite(goal_distance) ||
         !std::isfinite(d) || d < 0.15 || d > 1.20 ||
         d > goal_distance + 0.04 ||
         !forward_at(x, y, yaw, d, maneuver_collision)) {return BT::NodeStatus::FAILURE;}
@@ -873,7 +1220,7 @@ private:
     // pockets, not arbitrary increments of clear floor. Every intervening
     // footprint and the destination turn/exit are checked before driving.
     if (mode == "forward" && !force_retreat && !data_->escape_memory.committed &&
-      (!current_exit.clear || current_exit.turn == 0.0))
+      (translation_required || !current_exit.clear || current_exit.turn == 0.0))
     {
       const double goal_distance = std::hypot(goal.pose.position.x - x,
         goal.pose.position.y - y);
@@ -894,6 +1241,7 @@ private:
     }
     const double turn = current_exit.turn;
     if (mode == "turn_begin") {
+      if (translation_required) {return BT::NodeStatus::FAILURE;}
       const double a = getInput<double>("candidate_angle").value();
       data_->turn_geometric_stop = false;
       if (!std::isfinite(a) || std::abs(a) < 0.10 || std::abs(a) > kPi + 1e-6) {
@@ -917,13 +1265,13 @@ private:
       return BT::NodeStatus::SUCCESS;
     }
     if (mode == "turn") {
-      if (turn == 0.0) {return BT::NodeStatus::FAILURE;}
+      if (translation_required || turn == 0.0) {return BT::NodeStatus::FAILURE;}
       setOutput("turn_angle", turn);
       return BT::NodeStatus::SUCCESS;
     }
     // While retreating, NEVER stop just because advancing back toward the
     // previous dead end is possible. Stop only at a useful exit HERE.
-    const bool escape = current_exit.clear;
+    const bool escape = current_exit.clear && !translation_required;
     const bool retreat_clear = !escape && rear_clear();
     if (mode == "reverse_needed") {
       if (retreat_clear && !data_->retreat_active) {
@@ -1045,10 +1393,23 @@ public:
   static BT::PortsList providedPorts()
   {
     return {
+      BT::InputPort<geometry_msgs::msg::PoseStamped>("goal"),
       BT::InputPort<nav_msgs::msg::Path>("candidate_path"),
       BT::InputPort<std::string>("candidate_planner"),
       BT::InputPort<uint16_t>("controller_error", uint16_t{0}, "Execution fault"),
       BT::InputPort<double>("search_timeout", 60.0, "Stopped planning deadline in seconds"),
+      BT::InputPort<bool>("forward_search", true, "Search checked forward departures"),
+      BT::InputPort<bool>("compare_planners", false, "Compare all planners at each departure"),
+      BT::InputPort<bool>("selection_only", false, "Return shortest route without executing"),
+      BT::InputPort<bool>("refresh_on_failure", false, "Request fresh routes before stale detours"),
+      BT::InputPort<bool>("explore_forward_detours", false,
+        "Compare forward departures before accepting a long current-pose detour"),
+      BT::InputPort<bool>("explore_goal_approaches", false,
+        "Compare aligned terminal approaches when current-pose routes fail or detour"),
+      BT::InputPort<double>("max_near_goal_length", 0.0,
+        "Defer longer routes within 25 cm of the goal until checked local escape is tried"),
+      BT::OutputPort<std::string>("candidate_departure_mode"),
+      BT::OutputPort<std::string>("candidate_planner_request"),
       BT::OutputPort<double>("candidate_distance"),
       BT::OutputPort<nav_msgs::msg::Path>("path"),
       BT::OutputPort<std::string>("planner_id"),
@@ -1057,6 +1418,27 @@ public:
   BT::NodeStatus tick() override
   {
     if (childrenCount() != 3) {throw BT::RuntimeError("ForwardRouteSearch needs 3 children");}
+    // Nav2 updates the goal blackboard during action preemption. Cancel both
+    // an old planner and a running controller before comparing the new goal.
+    if (auto goal = getInput<geometry_msgs::msg::PoseStamped>("goal")) {
+      const auto & p = goal.value();
+      if (goal_seen_ && (p.header.frame_id != goal_.header.frame_id ||
+        std::hypot(p.pose.position.x - goal_.pose.position.x,
+        p.pose.position.y - goal_.pose.position.y) > 1e-6 ||
+        std::abs(wrapAngle(tf2::getYaw(p.pose.orientation) -
+        tf2::getYaw(goal_.pose.orientation))) > 1e-6))
+      {
+        resetChildren();
+        resetSearch();
+      }
+      goal_ = p;
+      if (!goal_seen_) {
+        RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
+          "Route goal: x=%.6f y=%.6f yaw=%.6f rad", p.pose.position.x,
+          p.pose.position.y, tf2::getYaw(p.pose.orientation));
+      }
+      goal_seen_ = true;
+    }
     if (deadline_ == std::chrono::steady_clock::time_point{}) {
       const double timeout = getInput<double>("search_timeout").value();
       if (!std::isfinite(timeout) || timeout <= 0.0 || timeout > 120.0) {
@@ -1066,16 +1448,67 @@ public:
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(timeout));
     }
+    const bool forward = getInput<bool>("forward_search").value();
+    const bool compare = getInput<bool>("compare_planners").value();
+    const size_t planners_per_start = compare ? 3 : 1;
+    constexpr size_t current_count = 5;
+    constexpr size_t forward_count = 8 * 3;
+    constexpr size_t approach_begin = current_count + forward_count;
+    if (!forward && phase_ == Phase::SEARCH && proposal_ == current_count &&
+      getInput<bool>("explore_forward_detours").value())
+    {
+      double shortest = std::numeric_limits<double>::infinity();
+      double direct_distance = 0.0;
+      for (const auto & choice : choices_) {
+        if (choice.length < shortest) {
+          shortest = choice.length;
+          const auto & start = choice.path.poses.front().pose.position;
+          const auto & end = choice.path.poses.back().pose.position;
+          direct_distance = std::hypot(end.x - start.x, end.y - start.y);
+        }
+      }
+      // A large Dubins loop can be an artefact of the departure heading.
+      // Compare complete checked forward departures before issuing motion.
+      // A genuine obstacle detour remains eligible if no shorter route fits.
+      search_forward_ = choices_.empty() ||
+        (direct_distance > 0.05 && shortest > 1.35 * direct_distance + 0.50);
+      if (search_forward_) {
+        RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
+          "Current-pose route is a detour (%.3f m vs %.3f m direct); compare forward starts before moving",
+          shortest, direct_distance);
+      }
+    }
+    const size_t proposal_count = forward ? 8 * planners_per_start :
+      (search_forward_ ? (getInput<bool>("explore_goal_approaches").value() ?
+      approach_begin + 9 : approach_begin) : current_count);
     setStatus(BT::NodeStatus::RUNNING);
     if (phase_ == Phase::SEARCH) {
       if (std::chrono::steady_clock::now() >= deadline_) {
         haltChild(0);
-        proposal_ = 8;
+        proposal_ = proposal_count;
         RCLCPP_WARN(rclcpp::get_logger("forward_route_search"),
           "Forward planning deadline reached; only validated candidates may execute");
       }
-      if (proposal_ < 8) {
-        setOutput("candidate_distance", 0.15 * (proposal_ + 1));
+      if (proposal_ < proposal_count) {
+        const bool approach_proposal = !forward && proposal_ >= approach_begin;
+        const bool forward_proposal = !approach_proposal &&
+          (forward || proposal_ >= current_count);
+        const size_t forward_index = forward ? proposal_ :
+          (proposal_ >= current_count ? proposal_ - current_count : 0);
+        const size_t count_per_start = forward ? planners_per_start : 3;
+        const double departure = approach_proposal ?
+          .25 * ((proposal_ - approach_begin) / 3 + 1) :
+          (forward_proposal ? 0.15 * (forward_index / count_per_start + 1) : 0.0);
+        const std::vector<std::string> planners = {"GridBased", "SE2Arc", "SE2Fallback"};
+        setOutput("candidate_distance", departure);
+        setOutput("candidate_departure_mode", std::string(approach_proposal ? "approach" :
+          (forward_proposal ? "forward" : "current")));
+        setOutput("candidate_planner_request", approach_proposal ?
+          planners[(proposal_ - approach_begin) % 3] :
+          (forward_proposal ?
+          planners[forward_index % count_per_start] :
+          (proposal_ == 0 ? std::string("Direct") :
+          (proposal_ == 1 ? std::string("DirectArc") : planners[proposal_ - 2]))));
         const auto result = children_nodes_[0]->executeTick();
         if (result == BT::NodeStatus::RUNNING) {return result;}
         if (result == BT::NodeStatus::SUCCESS) {
@@ -1085,11 +1518,18 @@ public:
             poses.push_back({p.pose.position.x, p.pose.position.y,
                 tf2::getYaw(p.pose.orientation)});
           }
+          double length = 0.0;
+          for (size_t i = 1; i < poses.size(); ++i) {
+            length += std::hypot(poses[i].x - poses[i - 1].x, poses[i].y - poses[i - 1].y);
+          }
           const double score = routePreference(poses);
           if (std::isfinite(score)) {
             choices_.push_back({std::move(path),
-                getInput<std::string>("candidate_planner").value(), score,
-                std::max(1.0, 0.15 * (proposal_ + 1) + 0.05)});
+                getInput<std::string>("candidate_planner").value(), score, length,
+                std::max(1.0, departure + 0.05)});
+            RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
+              "Checked candidate: departure %.2f m, planner %s, length %.3f m",
+              departure, choices_.back().planner.c_str(), length);
           }
         }
         haltChild(0);
@@ -1098,8 +1538,24 @@ public:
       }
       std::stable_sort(choices_.begin(), choices_.end(),
         [](const Choice & a, const Choice & b) {return a.score < b.score;});
+      const double near_goal_cap = getInput<double>("max_near_goal_length").value();
+      if (std::isfinite(near_goal_cap) && near_goal_cap > 0.0) {
+        const auto old_count = choices_.size();
+        choices_.erase(std::remove_if(choices_.begin(), choices_.end(),
+          [&](const Choice & choice) {
+            const auto & start = choice.path.poses.front().pose.position;
+            return std::hypot(goal_.pose.position.x - start.x,
+                     goal_.pose.position.y - start.y) < 0.25 &&
+                   choice.length > near_goal_cap;
+          }), choices_.end());
+        if (old_count != choices_.size()) {
+          RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
+            "Deferred %zu long near-goal routes until checked local escape",
+            old_count - choices_.size());
+        }
+      }
       RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
-        "Forward route search found %zu complete body-checked candidates", choices_.size());
+        "Route search found %zu complete body-checked candidates; shortest first", choices_.size());
       phase_ = Phase::VALIDATE;
     }
     if (selected_ >= choices_.size()) {return finish(BT::NodeStatus::FAILURE);}
@@ -1115,19 +1571,43 @@ public:
         return BT::NodeStatus::RUNNING;
       }
       phase_ = Phase::EXECUTE;
+      // ComputePathToPose publishes each trial to /plan. RViz must show the
+      // checked winner actually sent to FollowPath, including Direct paths.
+      std::shared_ptr<ClearanceData> data;
+      if (config().blackboard->get("tai_clearance_data", data)) {
+        auto chosen = choices_[selected_].path;
+        chosen.header.stamp = data->node->now();
+        data->selected_route_pub->publish(chosen);
+      }
       RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
-        "Trying forward route %zu/%zu, planner %s, length/turn score %.2f",
+        "Trying ranked route %zu/%zu, planner %s, length %.3f m",
         selected_ + 1, choices_.size(), choices_[selected_].planner.c_str(),
-        choices_[selected_].score);
+        choices_[selected_].length);
+      if (getInput<bool>("selection_only").value()) {return finish(BT::NodeStatus::SUCCESS);}
     }
     const auto result = children_nodes_[2]->executeTick();
     if (result == BT::NodeStatus::RUNNING) {return result;}
     haltChild(2);
-    if (result == BT::NodeStatus::SUCCESS) {return finish(result);}
+    if (result == BT::NodeStatus::SUCCESS) {
+      std::shared_ptr<ClearanceData> data;
+      if (goal_seen_ && config().blackboard->get("tai_clearance_data", data)) {
+        // RecoveryNode normally repeats its primary after a recovery succeeds.
+        // Here the recovery may itself have completed FollowPath to the goal.
+        // Preserve that authoritative result instead of starting another action.
+        data->completed_goal = goal_;
+        data->completed_goal_valid = true;
+      }
+      return finish(result);
+    }
     const auto error = getInput<uint16_t>("controller_error").value();
     if (error != 0 && error != 104 && error != 105 && error != 106) {
       RCLCPP_WARN(rclcpp::get_logger("forward_route_search"),
         "Controller fault %u: stopping route retries", error);
+      return finish(BT::NodeStatus::FAILURE);
+    }
+    if (getInput<bool>("refresh_on_failure").value()) {
+      RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
+        "Selected route stopped; compare fresh routes from the actual pose before longer detours");
       return finish(BT::NodeStatus::FAILURE);
     }
     RCLCPP_WARN(rclcpp::get_logger("forward_route_search"),
@@ -1154,17 +1634,21 @@ private:
     phase_ = Phase::SEARCH;
     choices_.clear();
     deadline_ = {};
+    goal_seen_ = false;
+    search_forward_ = false;
   }
   struct Choice {
     nav_msgs::msg::Path path;
     std::string planner;
-    double score, local_range;
+    double score, length, local_range;
   };
   enum class Phase {SEARCH, VALIDATE, EXECUTE};
   Phase phase_{Phase::SEARCH};
   size_t proposal_{0}, selected_{0};
   std::vector<Choice> choices_;
   std::chrono::steady_clock::time_point deadline_;
+  geometry_msgs::msg::PoseStamped goal_;
+  bool goal_seen_{false}, search_forward_{false};
 };
 
 // Asynchronously prime the shared cache before ANY planner/controller/recovery
@@ -1226,9 +1710,11 @@ public:
     if (getInput<bool>("reset_motion_history").value()) {
       std::shared_ptr<ClearanceData> data;
       if (config().blackboard->get("tai_clearance_data", data)) {
+        data->completed_goal_valid = false;
         data->turn_collision = false;
         data->failed_forward = false;
         data->retreat_active = data->retreat_stopped = false;
+        data->near_goal_reverse_pending = data->near_goal_reverse_done = false;
         data->forward_active = data->forward_geometric_stop = false;
         data->turn_attempts.clear();
         data->escape_memory.reset();
@@ -1256,6 +1742,7 @@ BT_REGISTER_NODES(factory)
 {
   factory.registerNodeType<tai_robot_one::PathFootprintClear>("PathFootprintClear");
   factory.registerNodeType<tai_robot_one::ForwardRouteSearch>("ForwardRouteSearch");
+  factory.registerNodeType<tai_robot_one::ForwardRouteSearch>("RankedRouteSearch");
   factory.registerNodeType<tai_robot_one::ResetEscapeState>("ResetEscapeState");
   factory.registerNodeType<tai_robot_one::WaitForClearanceData>("WaitForClearanceData");
 }

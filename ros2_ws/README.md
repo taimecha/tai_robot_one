@@ -231,16 +231,120 @@ ros2 launch tai_robot_one slam_nav_sim.launch.py
 
 # Điều hướng trên map đã lưu + AMCL; bắt buộc đường dẫn tuyệt đối
 ros2 launch tai_robot_one nav_sim.launch.py \
-  map:=/home/<user>/ros2_ws/maps/warehouse.yaml
+  map_file:=/home/<user>/ros2_ws/maps/warehouse.yaml
 ```
 
-Trong hai launch Nav2, point cloud camera được chuyển một lần thành
-`/camera/obstacle_scan` ở 10 Hz. Scan ảo thấp này giúp costmap và Collision
+`nav_sim.launch.py`, `slam_nav_sim.launch.py` và `nav_real.launch.py` mặc định
+dùng chung cây điều hướng kiểm tra khoảng trống và tuyến thẳng/cung tròn.
+Hai launch Nav2 mô phỏng đưa lệnh đã lọc `/cmd_vel_safe` tới bộ điều khiển
+bánh xe. Vùng dừng khẩn `VelocityStop` được tắt riêng trong mô phỏng;
+`FootprintApproach` và kiểm tra va chạm của controller vẫn hoạt động.
+Nav2 so sánh chiều dài các tuyến trực tiếp, XY, cung liên tục `SE2Arc` và
+lattice có thể xoay tại chỗ sau kiểm tra toàn bộ thân xe. Tuyến ngắn nhất
+được thử trước; chỉ dùng tuyến dài hơn khi tuyến ngắn bị chặn hoặc controller
+không thực hiện được. Độ mượt chỉ phân hạng khi chiều dài gần như bằng nhau
+(sai số số học 0,1 mm). Khi các tuyến dự phòng không đi được,
+cây hành vi chờ dữ liệu mới và thử lại thêm tối đa hai lượt trước khi báo thất bại.
+Trước khi nhận đường vòng dài, Nav2 so sánh thêm các phương án tiến một đoạn
+ngắn rồi rẽ (15–120 cm), gồm cả đoạn tiến trong chiều dài và kiểm tra thân xe.
+Các phương án này được xét ngay từ đầu, thay vì đợi đường vòng chạy lỗi.
+Bộ điều khiển báo trạng thái chặn xoay lặp để cây hành vi bỏ qua các lượt thử
+đường vô ích tại cùng vị trí và chuyển sang thao tác thoát đã kiểm tra.
+Thử trên Gazebo với bản đồ kho mô phỏng của repo (không dùng bản đồ xe thật):
+
+```bash
+cd /home/tai/tai_robot_one_community
+ros2 launch tai_robot_one nav_sim.launch.py \
+  map_file:="$PWD/maps/tai_warehouse.yaml" \
+  use_phone_teleop:=false
+```
+
+Trong RViz, chọn **Nav2 Goal** để thử một đích thẳng phía trước, một đích
+chéo phía trước có hướng cuối theo tiếp tuyến cung, rồi một đích có vật cản
+để quan sát đường dự phòng. Chỉ đường thẳng/cung tròn đã qua kiểm tra toàn bộ
+footprint mới được so sánh và gửi cho controller. Không có thứ tự cố định
+ưu tiên cung tròn hay xoay tại chỗ: ưu tiên chiều dài tuyến khả thi.
+
+Kiểm tra tự động việc đi từ gần `(0, 0)` tới cạnh kệ `(1.83, -1.16)` rồi
+quay về, với hướng cuối ngang (`yaw=0`) và giới hạn 180 giây mỗi goal:
+
+```bash
+ros2 run tai_robot_one test_nav_round_trip --scenario recent_goals
+```
+
+Thử chuỗi goal gần nhất: lên `(0, 2)`, sang `(.99, 2.02)`, rồi về `(0, 0)`,
+với hướng cuối `yaw=0`:
+
+```bash
+ros2 run tai_robot_one test_nav_round_trip --scenario latest_short_route
+```
+
+Goal từng xoay lặp rồi bị hủy tại khu vực phía bắc có bài thử riêng. Mở mô
+phỏng với `spawn_x:=0.1296116 spawn_y:=2.4149426 spawn_yaw:=0.4636476`, rồi chạy:
+
+```bash
+ros2 run tai_robot_one test_nav_round_trip --scenario latest_turn_escape
+```
+
+Bài thử này dùng đích `(-1.731213, 1.048116)`, hướng cuối `-1.571597 rad`
+đọc từ tuyến đã bị hủy. Bộ bám đường bỏ qua điểm xoay đã hoàn thành; khi
+giới hạn xoay yêu cầu dịch chuyển, cây hành vi vẫn cho phép tiến/lùi đã kiểm tra.
+
+Hai goal cạnh kệ từng lỗi có bài thử `latest_rack_pair`. Mở mô phỏng với
+`spawn_x:=0.42 spawn_y:=0.17 spawn_yaw:=0.0`, rồi chạy:
+
+```bash
+ros2 run tai_robot_one test_nav_round_trip --scenario latest_rack_pair
+```
+
+Goal đầu `(1.650, -1.106)` dùng hướng sang phải `yaw=0` do người dùng xác nhận;
+goal thứ hai `(1.481171, -1.186490)` dùng hướng `0.102340 rad` từ tuyến cũ.
+Để thử riêng goal thứ hai từ vị trí từng bị lỗi, mở mô phỏng với
+`spawn_x:=0.90 spawn_y:=-0.44 spawn_yaw:=-1.11`, rồi chạy:
+
+```bash
+ros2 run tai_robot_one test_nav_round_trip --scenario latest_rack_second
+```
+
+Khi cần tìm thêm tuyến, hệ thống xét cả điểm chỉnh hướng cách đích
+25/50/75 cm rồi đi thẳng vào, với kiểm tra toàn bộ thân xe và chiều dài tuyến.
+FollowPath thành công trong recovery kết thúc goal ngay; tuyến bị chặn khi
+đang chạy được tính lại từ vị trí mới.
+
+Ở vùng trống, ứng viên `Direct` gồm xoay tại chỗ theo hướng đích, đi thẳng
+rồi canh hướng cuối. Nó được so chiều dài với `DirectArc` và các planner;
+độ lệch hướng xuất phát không còn loại đường thẳng khỏi danh sách.
+Hai goal qua lại ở phía bắc có bài thử `latest_open_pair`. Mở mô phỏng với
+`spawn_x:=2.01 spawn_y:=2.96 spawn_yaw:=0.0`, rồi chạy:
+
+```bash
+ros2 run tai_robot_one test_nav_round_trip --scenario latest_open_pair
+```
+
+Lệnh này gửi goal và làm xe mô phỏng di chuyển; không đặt thêm goal trong RViz
+trong lúc kiểm tra. Tọa độ này chỉ dùng cho bản đồ kho mô phỏng của repo.
+
+Trong hai launch Nav2 mô phỏng, point cloud camera được chuyển một lần thành
+`/camera/obstacle_scan` với tốc độ mục tiêu 10 Hz. Scan ảo thấp này giúp costmap và Collision
 Monitor phát hiện cột kệ cao `0.680 m` và pallet có tải trong vùng nhìn mà lidar
-đặt ở cao độ `0.835 m` có thể quét vượt qua. Camera đang đặt ngang nên không bảo
-đảm thấy pallet trống cao khoảng `35 mm` ở gần xe, vật phía sau hoặc vật ngoài
-FOV; đây không phải cảm biến an toàn. SLAM Toolbox vẫn lập occupancy map từ
-lidar `/scan`; camera scan chỉ được dùng như lớp vật cản động khi điều hướng.
+đặt ở cao độ `0.385 m` có thể quét vượt qua. LiDAR mô phỏng và xe thật cùng
+dùng transform từ `base_footprint`: `x=-0.2115 m`, `y=0`, `z=0.385 m`,
+`yaw=-2°`. Camera mô phỏng ở cao độ `0.8 m`, có góc pitch URDF `+20°` để
+quét xuống phía trước; transform camera xe thật vẫn giữ hiệu chuẩn hiện hành.
+Mô phỏng bật camera theo mặc định; `/camera/obstacle_scan` cấp vật cản
+cho cả costmap và Collision Monitor. Camera không bảo đảm thấy pallet trống
+cao khoảng `35 mm` ở vùng gần dưới tầm sâu `0.6 m`, vật phía sau hoặc ngoài
+FOV; đây không phải cảm biến an toàn. SLAM Toolbox lập occupancy map từ LiDAR
+`/scan_filtered`; camera scan là lớp vật cản động khi điều hướng.
+
+LiDAR Gazebo lọc thêm tia đơn lẻ không có tia liền kề ở khoảng cách tương tự
+(chênh lệch tối đa 0.10 m), để điểm nhiễu không tồn tại như vật cản giả trong
+costmap. Tia bị loại là `NaN`, không xóa vật cản phía sau. Bộ lọc này chỉ bật
+trong mô phỏng; vật cản chỉ xuất hiện trên một tia có thể bị bỏ sót.
+
+Trong terminal đã source cùng workspace, kiểm tra camera đang quét bằng
+`ros2 topic hz /camera/obstacle_scan`; xem các tia đo bằng
+`ros2 topic echo --once /camera/obstacle_scan`.
 
 Chỉ sau khi các gate mô phỏng đạt mới dùng
 `real_hardware.launch.py` trên Raspberry Pi 5. Cấu hình hai ESP32 hiện tại mở

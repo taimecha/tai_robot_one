@@ -431,23 +431,21 @@
     <!-- Front lift mast and the 0-520 mm prismatic fork mechanism. -->
     <xacro:forklift_assembly parent="base_link"/>
 
-    <!-- Simulation/final bracket keeps both sensors at their designed height.
-         On the current real robot only the camera is on that bracket; the
-         lidar temporarily sits directly on the chassis top. -->
+    <!-- Gazebo's camera data use +X forward: a positive URDF Y rotation
+         points +X downward. Keep the existing real-camera calibration until
+         its point-cloud driver can be checked independently. -->
     <xacro:if value="$(arg use_sim)">
-        <xacro:mast_sensor_mount parent="mast_frame" include_lidar="true"/>
+        <xacro:mast_sensor_mount parent="mast_frame" include_lidar="false"
+                                 camera_pitch="${20.0 * pi / 180.0}"/>
     </xacro:if>
     <xacro:unless value="$(arg use_sim)">
-        <!-- The camera on the real bracket is pitched 20 degrees downward. -->
         <xacro:mast_sensor_mount parent="mast_frame" include_lidar="false"
                                  camera_pitch="${-20.0 * pi / 180.0}"/>
-        <!-- Real-robot scan alignment calibration: the temporary lidar mount
-             is 0.2115 m behind base_footprint. The A1M8 scan plane is 50 mm
-             above its bottom, which rests on the 0.335 m-high chassis top. -->
-        <xacro:fork_mast_lidar parent="base_footprint"
-                               x="-0.2115" y="0.0" z="0.385"
-                               yaw="${-2.0 * pi / 180.0}"/>
     </xacro:unless>
+    <!-- Both lidars use the validated temporary chassis mount. -->
+    <xacro:fork_mast_lidar parent="base_footprint"
+                           x="${lidar_installed_x}" y="${lidar_installed_y}"
+                           z="${lidar_installed_z}" yaw="${lidar_installed_yaw}"/>
 
     <!-- BNO055 mounted near the centre of the chassis top surface. -->
     <xacro:bno055_imu parent="chassis" x="0.0" y="0.0" yaw="0.0"/>

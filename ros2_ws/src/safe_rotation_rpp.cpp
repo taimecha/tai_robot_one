@@ -23,10 +23,42 @@ class SafeRotationRPP : public
   using Base = nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController;
 
 public:
+  void configure(
+    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent, std::string name,
+    std::shared_ptr<tf2_ros::Buffer> tf,
+    std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override
+  {
+    Base::configure(parent, name, tf, costmap_ros);
+    turn_limited_pub_ = parent.lock()->create_publisher<std_msgs::msg::Bool>(
+      "/navigation/stationary_turn_limited", rclcpp::QoS(1).reliable().transient_local());
+  }
+
+  void activate() override
+  {
+    Base::activate();
+    turn_limited_pub_->on_activate();
+    publishTurnLimit();
+  }
+
+  void deactivate() override
+  {
+    turn_limited_pub_->on_deactivate();
+    Base::deactivate();
+  }
+
+  void cleanup() override
+  {
+    turn_limited_pub_.reset();
+    Base::cleanup();
+  }
+
   void reset() override
   {
     turning_ = false;
+    aligning_terminal_yaw_ = false;
+    terminal_arrival_seen_ = false;
     rotation_blocked_ = false;
+    has_reached_xy_tolerance_ = false;
     // Keep a tripped turn guard across FollowPath retries for the same goal.
     Base::reset();
   }
@@ -44,6 +76,7 @@ public:
         new_goal = true;
         turn_guard_.reset();
         turn_limit_exceeded_ = false;
+        publishTurnLimit();
         goal_frame_ = path.header.frame_id;
         goal_x_ = goal.position.x;
         goal_y_ = goal.position.y;
@@ -56,6 +89,8 @@ public:
     // heading target and led to back-and-forth turns near arrival.
     if (new_goal) {
       turning_ = false;
+      aligning_terminal_yaw_ = false;
+      terminal_arrival_seen_ = false;
       has_reached_xy_tolerance_ = false;
     }
     // A blocked sweep may be retried only after a fresh global plan.
@@ -80,8 +115,10 @@ public:
     std::unique_lock<std::mutex> parameter_lock(param_handler_->getMutex());
     std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*costmap_->getMutex());
     const double yaw = tf2::getYaw(pose.pose.orientation);
+    const bool previously_limited = turn_limit_exceeded_;
     turn_limit_exceeded_ = turn_guard_.update(
       pose.pose.position.x, pose.pose.position.y, yaw);
+    if (previously_limited != turn_limit_exceeded_) {publishTurnLimit();}
     if (turn_limit_exceeded_) {
       turning_ = false;
       turn_limit_exceeded_ = true;
@@ -110,31 +147,102 @@ public:
     const auto target = trackingTarget(tracking_poses);
     double angle = target.at_turn ? target.planned_turn : target.initial_angle;
     const auto & end = plan.poses.back().pose;
-    const bool at_goal = std::hypot(end.position.x, end.position.y) < xy_tolerance;
-    has_reached_xy_tolerance_ = has_reached_xy_tolerance_ || at_goal;
-    if (has_reached_xy_tolerance_) {
-      angle = wrapAngle(tf2::getYaw(end.orientation));
+    double remaining_length = 0.0;
+    for (size_t i = 1; i < plan.poses.size(); ++i) {
+      const auto & a = plan.poses[i - 1].pose.position;
+      const auto & b = plan.poses[i].pose.position;
+      remaining_length += std::hypot(b.x - a.x, b.y - a.y);
+    }
+    // A route leaving a nearby goal to align must finish its travel before
+    // latching final yaw; proximity at its launch is not terminal arrival.
+    const bool at_goal = remaining_length <= 0.15 &&
+      std::hypot(end.position.x, end.position.y) < xy_tolerance;
+    // Match the non-stateful goal checker: if the robot drifts outside XY
+    // tolerance during alignment, resume tracking instead of stopping there.
+    has_reached_xy_tolerance_ = at_goal;
+    terminal_arrival_seen_ = terminal_arrival_seen_ || at_goal;
+    const double goal_yaw_error = wrapAngle(tf2::getYaw(end.orientation));
+    if (at_goal && std::abs(goal_yaw_error) > yaw_tolerance) {
+      aligning_terminal_yaw_ = true;
+    }
+    if (aligning_terminal_yaw_ && std::abs(goal_yaw_error) <= yaw_tolerance) {
+      aligning_terminal_yaw_ = false;
+      turning_ = false;
+    }
+    if (aligning_terminal_yaw_ && std::hypot(end.position.x, end.position.y) > 0.15) {
+      aligning_terminal_yaw_ = false;
+      turning_ = false;
+      throw nav2_core::NoValidControl("Final pivot drift exceeds checked terminal region");
+    }
+    if (!at_goal && remaining_length <= 0.15) {
+      // After skid/localization drift during the final pivot, the old line
+      // tangent can point away from the goal. Rejoin the exact endpoint using
+      // its current bearing instead of repeatedly rotating toward that tangent.
+      angle = std::atan2(end.position.y, end.position.x);
+    }
+    if (has_reached_xy_tolerance_ || aligning_terminal_yaw_) {
+      angle = goal_yaw_error;
         // Arrival always tracks the current shortest signed yaw error.
         // A latched long sweep or a little overshoot must not cause a full lap.
       turning_ = false;
     }
-    const double threshold = has_reached_xy_tolerance_ ? yaw_tolerance :
-      (target.at_turn ? 0.04 : params_->rotate_to_heading_min_angle);
+    if (!aligning_terminal_yaw_ && terminalReverseCorrectionAllowed(
+        end.position.x, end.position.y, remaining_length, xy_tolerance,
+        goal_yaw_error, terminal_arrival_seen_))
+    {
+      turning_ = false;
+      geometry_msgs::msg::TwistStamped command;
+      command.header = pose.header;
+      // Stop the pivot before retreating. Check the whole straight correction
+      // with the physical footprint, in addition to native time-to-collision.
+      if (std::abs(velocity.angular.z) > 0.02 || velocity.linear.x > 0.02) {return command;}
+      const double retreat = -end.position.x;
+      const int samples = std::max(1, static_cast<int>(std::ceil(retreat / 0.01)));
+      for (int i = 0; i <= samples; ++i) {
+        const double d = retreat * static_cast<double>(i) / samples;
+        if (collision_checker_->inCollision(pose.pose.position.x - d * std::cos(yaw),
+            pose.pose.position.y - d * std::sin(yaw), yaw))
+        {
+          throw nav2_core::NoValidControl("Terminal reverse correction corridor blocked");
+        }
+      }
+      command.twist.linear.x = -std::min(0.08, params_->desired_linear_vel);
+      if (collision_checker_->isCollisionImminent(
+          pose, command.twist.linear.x, 0.0, retreat))
+      {
+        throw nav2_core::NoValidControl("Terminal reverse correction collision check failed");
+      }
+      return command;
+    }
+    const bool continue_terminal_tracking = !target.at_turn &&
+      canApproachGoalWithoutStationaryTurn(
+      end.position.x, end.position.y, remaining_length, xy_tolerance);
+    const bool goal_rotation = has_reached_xy_tolerance_ || aligning_terminal_yaw_;
+    if (remaining_length <= 0.15) {
+      RCLCPP_DEBUG_THROTTLE(logger_, *costmap_ros_->get_clock(), 1000,
+        "terminal xy=(%.3f,%.3f) yaw=%.3f remaining=%.3f at=%d align=%d turning=%d angle=%.3f error=%.3f",
+        end.position.x, end.position.y, yaw, remaining_, at_goal,
+        aligning_terminal_yaw_, turning_, angle, goal_yaw_error);
+    }
+    const double threshold = goal_rotation ? yaw_tolerance :
+      (target.at_turn ? 0.04 : (continue_terminal_tracking ? 0.80 :
+      params_->rotate_to_heading_min_angle));
     if (!turning_) {
       if (std::abs(angle) > threshold) {
         const auto chosen = chooseRotation(angle,
             [&](double sweep) {return sweepClear(pose, yaw, sweep);},
-          !has_reached_xy_tolerance_ && std::hypot(end.position.x, end.position.y) > 0.50);
+          !goal_rotation && std::hypot(end.position.x, end.position.y) > 0.50);
         if (!chosen) {
           rotation_blocked_ = true;
           throw nav2_core::NoValidControl("Both complete heading sweeps blocked; replan required");
         }
         if (std::abs(*chosen) > StationaryTurnGuard::kMaxSweep) {
           turn_limit_exceeded_ = true;
+          publishTurnLimit();
           throw nav2_core::NoValidControl("Safe heading sweep exceeds stationary turn limit");
         }
         remaining_ = *chosen;
-        turn_tolerance_ = has_reached_xy_tolerance_ ? yaw_tolerance : 0.04;
+        turn_tolerance_ = goal_rotation ? yaw_tolerance : 0.04;
         turning_ = true;
         last_yaw_ = yaw;
       }
@@ -232,6 +340,14 @@ public:
   }
 
 private:
+  void publishTurnLimit()
+  {
+    if (!turn_limited_pub_ || !turn_limited_pub_->is_activated()) {return;}
+    std_msgs::msg::Bool state;
+    state.data = turn_limit_exceeded_;
+    turn_limited_pub_->publish(state);
+  }
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::Bool>::SharedPtr turn_limited_pub_;
   bool sweepClear(const geometry_msgs::msg::PoseStamped & pose, double yaw, double angle)
   {
     return rotationSweepClear(yaw, angle, [&](double heading) {
@@ -240,6 +356,8 @@ private:
     });
   }
   bool turning_{false};
+  bool aligning_terminal_yaw_{false};
+  bool terminal_arrival_seen_{false};
   bool rotation_blocked_{false};
   bool turn_limit_exceeded_{false};
   bool have_goal_{false};

@@ -119,6 +119,20 @@ def generate_launch_description():
         }],
     )
 
+    scan_self_filter = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            package_share, 'launch', 'scan_self_filter.launch.py')),
+        # The simulated mast collision extends a few centimetres farther
+        # than the physical self-return mask. Keep that wider mask in Gazebo.
+        launch_arguments={
+            'use_sim_time': use_sim_time,
+            'max_x': '0.56',
+            'min_y': '-0.18',
+            'max_y': '0.18',
+            'speckle_max_difference': '0.10',
+        }.items(),
+    )
+
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -134,7 +148,10 @@ def generate_launch_description():
         executable='cmd_vel_stamper',
         name='cmd_vel_stamper',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'input_topic': LaunchConfiguration('cmd_vel_input_topic'),
+        }],
     )
 
     phone_teleop = Node(
@@ -171,7 +188,7 @@ def generate_launch_description():
         name='imu_visualizer',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
-        condition=IfCondition(use_rviz),
+        condition=IfCondition(LaunchConfiguration('gazebo_rviz')),
     )
 
     spawn_robot = Node(
@@ -276,7 +293,7 @@ def generate_launch_description():
         output='screen',
         arguments=['-d', rviz_config],
         parameters=[{'use_sim_time': use_sim_time}],
-        condition=IfCondition(use_rviz),
+        condition=IfCondition(LaunchConfiguration('gazebo_rviz')),
     )
 
     # Wait until ros2_control supplies joint states and raw wheel odometry; the
@@ -328,9 +345,17 @@ def generate_launch_description():
             default_value='true',
             description='Use the Gazebo /clock topic for all ROS nodes'),
         DeclareLaunchArgument(
+            'cmd_vel_input_topic',
+            default_value='/cmd_vel',
+            description='Twist topic forwarded to the simulated base'),
+        DeclareLaunchArgument(
             'use_rviz',
             default_value='true',
             description='Open RViz together with Gazebo'),
+        DeclareLaunchArgument(
+            'gazebo_rviz',
+            default_value=use_rviz,
+            description='RViz setting retained for delayed Gazebo startup'),
         DeclareLaunchArgument(
             'use_phone_teleop',
             default_value='true',
@@ -356,6 +381,7 @@ def generate_launch_description():
         gazebo,
         gazebo_bridge,
         astra_sim_range_filter,
+        scan_self_filter,
         robot_state_publisher,
         cmd_vel_stamper,
         phone_teleop,

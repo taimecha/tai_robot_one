@@ -4,6 +4,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     TimerAction,
 )
@@ -77,6 +78,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('gazebo_rviz', default_value='false'),
         DeclareLaunchArgument(
             'use_rviz', default_value='true',
             description='Open the map-focused SLAM RViz configuration'),
@@ -100,7 +103,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'teleop_start_delay', default_value='6.0',
             description='Wall-clock seconds before optional keyboard teleop'),
-        gazebo,
+        GroupAction(actions=[gazebo]),
         TimerAction(
             period=slam_start_delay,
             actions=[slam, imu_visualizer, rviz]),

@@ -8,9 +8,27 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
 
-def filter_ranges(scan, min_x, max_x, min_y, max_y):
+def filter_ranges(scan, min_x, max_x, min_y, max_y, speckle_max_difference=0.0):
     """Return ranges with points inside the robot's lidar shadow removed."""
     ranges = list(scan.ranges)
+    if speckle_max_difference > 0.0:
+        # Gazebo raycasts occasionally yield an isolated short hit. Invalid
+        # rays must neither mark an obstacle nor clear through a possible one.
+        circular = abs(scan.angle_max - scan.angle_min) > 2 * math.pi - 0.05
+        for index, distance in enumerate(scan.ranges):
+            if not math.isfinite(distance):
+                continue
+            supported = False
+            for neighbor in (index - 1, index + 1):
+                if circular:
+                    neighbor %= len(ranges)
+                if 0 <= neighbor < len(ranges):
+                    other = scan.ranges[neighbor]
+                    if math.isfinite(other) and abs(other - distance) <= speckle_max_difference:
+                        supported = True
+                        break
+            if not supported:
+                ranges[index] = math.nan
     for index, distance in enumerate(ranges):
         if not math.isfinite(distance):
             continue
@@ -32,11 +50,14 @@ class ScanSelfFilter(Node):
         self.declare_parameter('max_x', 0.51)
         self.declare_parameter('min_y', -0.155)
         self.declare_parameter('max_y', 0.155)
+        self.declare_parameter('speckle_max_difference', 0.0)
 
         self.min_x = float(self.get_parameter('min_x').value)
         self.max_x = float(self.get_parameter('max_x').value)
         self.min_y = float(self.get_parameter('min_y').value)
         self.max_y = float(self.get_parameter('max_y').value)
+        self.speckle_max_difference = float(
+            self.get_parameter('speckle_max_difference').value)
         input_topic = str(self.get_parameter('input_topic').value)
         output_topic = str(self.get_parameter('output_topic').value)
         rviz_output_topic = str(
@@ -54,7 +75,8 @@ class ScanSelfFilter(Node):
             f'Filtering {input_topic} -> {output_topic} '
             f'(RViz: {rviz_output_topic}); lidar-frame box '
             f'x=[{self.min_x:.3f}, {self.max_x:.3f}], '
-            f'y=[{self.min_y:.3f}, {self.max_y:.3f}] m')
+            f'y=[{self.min_y:.3f}, {self.max_y:.3f}] m; '
+            f'isolated-hit tolerance={self.speckle_max_difference:.3f} m')
 
     def _scan_callback(self, scan):
         filtered = LaserScan()
@@ -67,7 +89,8 @@ class ScanSelfFilter(Node):
         filtered.range_min = scan.range_min
         filtered.range_max = scan.range_max
         filtered.ranges = filter_ranges(
-            scan, self.min_x, self.max_x, self.min_y, self.max_y)
+            scan, self.min_x, self.max_x, self.min_y, self.max_y,
+            self.speckle_max_difference)
         filtered.intensities = scan.intensities
         self.publisher.publish(filtered)
 

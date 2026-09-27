@@ -237,7 +237,13 @@ def generate_launch_description():
         executable='nav_path_display_filter',
         name='nav_path_display_filter',
         output='screen',
-        parameters=[{'use_sim_time': False}],
+        parameters=[{
+            'use_sim_time': False,
+            'global_path_topic': PythonExpression([
+                "'/plan' if '", LaunchConfiguration('motion_test'),
+                "'.lower() in ('1', 'true', 'yes', 'on') else '/plan_selected'",
+            ]),
+        }],
         condition=IfCondition(LaunchConfiguration('start_navigation')),
     )
 

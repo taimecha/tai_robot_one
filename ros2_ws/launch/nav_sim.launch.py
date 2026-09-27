@@ -4,14 +4,15 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
     TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch_ros.actions import Node, SetRemap
 from nav2_common.launch import RewrittenYaml
 
 
@@ -35,9 +36,14 @@ def _launch_nav2(context, nav2_share, nav2_params, nav_to_pose_bt):
         source_file=nav2_params,
         param_rewrites={
             'default_nav_to_pose_bt_xml': nav_to_pose_bt,
-            'amcl.ros__parameters.initial_pose.x': LaunchConfiguration('spawn_x'),
-            'amcl.ros__parameters.initial_pose.y': LaunchConfiguration('spawn_y'),
-            'amcl.ros__parameters.initial_pose.yaw': LaunchConfiguration('spawn_yaw'),
+            'map_server.ros__parameters.yaml_filename': map_file,
+            'collision_monitor.ros__parameters.VelocityStop.enabled': 'false',
+            'amcl.ros__parameters.initial_pose.x': str(float(
+                LaunchConfiguration('spawn_x').perform(context))),
+            'amcl.ros__parameters.initial_pose.y': str(float(
+                LaunchConfiguration('spawn_y').perform(context))),
+            'amcl.ros__parameters.initial_pose.yaw': str(float(
+                LaunchConfiguration('spawn_yaw').perform(context))),
         },
         convert_types=True,
     )
@@ -60,7 +66,11 @@ def _launch_nav2(context, nav2_share, nav2_params, nav_to_pose_bt):
             os.path.join(nav2_share, 'launch', 'navigation_launch.py')),
         launch_arguments=common_arguments.items(),
     )
-    return [localization, navigation]
+    return [GroupAction([
+        SetRemap(src='/scan', dst='/scan_filtered'),
+        localization,
+        navigation,
+    ])]
 
 
 def generate_launch_description():
@@ -78,14 +88,15 @@ def generate_launch_description():
     startup_delay = LaunchConfiguration('startup_delay')
     nav2_params = os.path.join(package_share, 'config', 'nav2_params.yaml')
     nav_to_pose_bt = os.path.join(
-        package_share, 'behavior_trees', 'navigate_to_pose_no_reverse.xml')
-    nav2_rviz = os.path.join(nav2_share, 'rviz', 'nav2_default_view.rviz')
+        package_share, 'behavior_trees', 'navigate_real_clearance_escape.xml')
+    nav2_rviz = os.path.join(package_share, 'config', 'nav_robot.rviz')
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(package_share, 'launch', 'gazebo_sim.launch.py')),
         launch_arguments={
             'use_rviz': 'false',
+            'cmd_vel_input_topic': '/cmd_vel_safe',
             'headless': headless,
             'spawn_x': LaunchConfiguration('spawn_x'),
             'spawn_y': LaunchConfiguration('spawn_y'),
@@ -127,7 +138,7 @@ def generate_launch_description():
             'use_sim_time': True,
             'target_frame': 'base_footprint',
             'transform_tolerance': 0.05,
-            'min_height': 0.05,
+            'min_height': 0.12,
             'max_height': 0.75,
             'angle_min': -0.5235987756,
             'angle_max': 0.5235987756,
@@ -147,13 +158,15 @@ def generate_launch_description():
         executable='nav_path_display_filter',
         name='nav_path_display_filter',
         output='screen',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': True, 'global_path_topic': '/plan_selected'}],
     )
 
     return LaunchDescription([
         DeclareLaunchArgument('spawn_x', default_value='0.0'),
         DeclareLaunchArgument('spawn_y', default_value='0.0'),
         DeclareLaunchArgument('spawn_yaw', default_value='0.0'),
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('gazebo_rviz', default_value='false'),
         DeclareLaunchArgument(
             'map_file',
             description='Absolute path to a map YAML saved by slam_toolbox'),
@@ -170,11 +183,18 @@ def generate_launch_description():
             'headless', default_value='false',
             description='Run Gazebo without its 3D client'),
         DeclareLaunchArgument(
-            'startup_delay', default_value='7.0',
+            'startup_delay', default_value='20.0',
             description='Wall-clock seconds before starting AMCL and Nav2'),
         OpaqueFunction(function=_validate_map),
-        gazebo,
+        # Scope Gazebo's use_rviz:=false to its own include. Otherwise it
+        # overrides this launch's true default and hides the Nav2 RViz window.
+        GroupAction(actions=[gazebo]),
         camera_obstacle_scan,
         nav_path_display_filter,
-        TimerAction(period=startup_delay, actions=[navigation, rviz]),
+        TimerAction(period=startup_delay, actions=[navigation]),
+        # Gazebo's GUI, all Nav2 lifecycle nodes and RViz compete for CPU and
+        # DDS discovery during startup. Open RViz after Nav2 has settled.
+        TimerAction(
+            period=PythonExpression([startup_delay, ' + 12.0']),
+            actions=[rviz]),
     ])

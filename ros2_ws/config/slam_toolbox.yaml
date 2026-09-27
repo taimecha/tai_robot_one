@@ -6,7 +6,7 @@ slam_toolbox:
     odom_frame: odom
     map_frame: map
     base_frame: base_footprint
-    scan_topic: /scan
+    scan_topic: /scan_filtered
     # mode: mapping
     mode: localization
     map_file_name: /home/tai/ros2_ws/maps/tai_warehouse_serial

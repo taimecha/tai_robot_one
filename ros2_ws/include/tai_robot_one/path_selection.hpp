@@ -8,8 +8,9 @@
 #include "tai_robot_one/path_tracking.hpp"
 namespace tai_robot_one
 {
-// Length dominates; penalize heading variation and repeated stop-to-turn
-// manoeuvres without smoothing a safe path into an unchecked obstacle.
+// Compare length first (0.1 mm numerical buckets), then heading variation
+// and stop-to-turn manoeuvres. A smoother long detour cannot beat a shorter
+// route. Buckets give a strict ordering, unlike pairwise epsilon comparisons.
 inline double routePreference(const std::vector<TrackingPose> & path)
 {
   if (path.size() < 2) {return std::numeric_limits<double>::infinity();}
@@ -28,7 +29,10 @@ inline double routePreference(const std::vector<TrackingPose> & path)
     length += d;
     turning += a;
   }
-  return length + 0.10 * turning + 0.05 * stops;
+  constexpr double numerical_resolution = 0.0001;
+  const double turns = 0.10 * turning + 0.05 * stops;
+  return std::floor(length / numerical_resolution + 0.5) * numerical_resolution +
+         numerical_resolution * 0.99 * (turns / (1.0 + turns));
 }
 }  // namespace tai_robot_one
 #endif  // TAI_ROBOT_ONE__PATH_SELECTION_HPP_
