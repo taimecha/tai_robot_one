@@ -124,6 +124,11 @@ public:
     if (turn_limit_exceeded_) {
       turning_ = false;
       turn_limit_exceeded_ = true;
+      RCLCPP_WARN(logger_,
+        "Turn limit at local pose (%.3f, %.3f, %.3f), target goal (%.3f, %.3f, %.3f), "
+        "remaining turn %.3f, terminal alignment %d",
+        pose.pose.position.x, pose.pose.position.y, yaw, goal_x_, goal_y_, goal_yaw_,
+        remaining_, aligning_terminal_yaw_);
       throw nav2_core::NoValidControl(
               "Stationary turn budget exceeded; a translated escape is required");
     }

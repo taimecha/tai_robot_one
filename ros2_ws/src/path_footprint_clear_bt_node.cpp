@@ -1478,18 +1478,13 @@ public:
           shortest, direct_distance);
       }
       if (getInput<bool>("explore_goal_approaches").value()) {
-        const auto direct = std::find_if(choices_.begin(), choices_.end(),
-            [](const Choice & choice) {return choice.planner == "Direct";});
         if (choices_.empty()) {
           search_approach_ = true;
-        } else if (direct != choices_.end() && direct->length > 0.5) {
-          std::vector<TrackingPose> poses;
-          for (const auto & p : direct->path.poses) {
-            poses.push_back({p.pose.position.x, p.pose.position.y,
-                tf2::getYaw(p.pose.orientation)});
-          }
-          search_approach_ = terminalPivotAngle(poses) > 0.6;
         }
+        // A fully checked Direct route already includes its terminal sweep.
+        // Only search standoff approaches when no route from this pose fits;
+        // otherwise the extra planning load delays motion and can prefer a
+        // longer arrival around empty floor.
         if (search_approach_ && !search_forward_) {
           // Compare aligned arrivals without paying for unrelated forward
           // departure trials on a short, already-clear current-pose route.
@@ -1498,9 +1493,8 @@ public:
       }
     }
     const size_t proposal_count = forward ? 8 * planners_per_start :
-      (search_forward_ || search_approach_ ?
-      (getInput<bool>("explore_goal_approaches").value() ?
-      approach_begin + 9 : approach_begin) : current_count);
+      (search_approach_ ? approach_begin + 9 :
+      (search_forward_ ? approach_begin : current_count));
     setStatus(BT::NodeStatus::RUNNING);
     if (phase_ == Phase::SEARCH) {
       if (std::chrono::steady_clock::now() >= deadline_) {

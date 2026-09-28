@@ -24,7 +24,8 @@ def main():
         'recent_goals', 'latest_short_route', 'latest_return_only',
         'latest_turn_escape', 'latest_rack_pair', 'latest_rack_second',
         'latest_open_pair', 'latest_three_goals', 'latest_first_goal',
-        'latest_second_goal', 'latest_second_third'], default='round_trip')
+        'latest_second_goal', 'latest_second_third', 'reported_abort',
+        'reported_sequence'], default='round_trip')
     parser.add_argument('--goal-timeout', type=float, default=180.0,
                         help='Wall-clock timeout for each goal in seconds')
     args = parser.parse_args()
@@ -109,6 +110,15 @@ def main():
         # Launch at the measured first-goal arrival (.023, .431, -.067).
         goals = [(.162211, 2.491690, -.000801),
                  (-.172655, .019487, -.011582)]
+    elif args.scenario == 'reported_abort':
+        # Last failed RViz goal on 2026-09-28. Launch at the previous goal's
+        # reported arrival near (3.45, 2.97, -1.5716).
+        goals = [(-.012345, .009584, -.002805)]
+    elif args.scenario == 'reported_sequence':
+        # The user's latest sequence, from the normal origin spawn.
+        goals = [(.720903, 2.195121, .545366),
+                 (3.463234, 2.996846, -1.571597),
+                 (-.012345, .009584, -.002805)]
     elif args.scenario == 'recent_goals':
         # Replay the recent rack-side / origin XY positions with an explicit
         # horizontal final heading. Original RViz arrow headings were not logged.

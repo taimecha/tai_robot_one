@@ -34,8 +34,8 @@ inline double terminalPivotAngle(const std::vector<TrackingPose> & path)
   }
   return std::abs(wrapAngle(path.back().yaw - final_travel_heading));
 }
-// Penalize terminal turns large enough to produce observed lateral skid drift.
-// Keep route length dominant for small turns and use heading variation for ties.
+// Prefer the shortest collision-checked route. A terminal pivot has a small
+// tie-breaking cost, but must not send the robot around a visible clear gap.
 inline double routePreference(const std::vector<TrackingPose> & path)
 {
   if (path.size() < 2) {return std::numeric_limits<double>::infinity();}
@@ -54,7 +54,7 @@ inline double routePreference(const std::vector<TrackingPose> & path)
     length += d;
     turning += a;
   }
-  const double wheel_travel_cost = 0.45 * std::max(0.0, terminalPivotAngle(path) - 0.5);
+  const double wheel_travel_cost = 0.01 * std::max(0.0, terminalPivotAngle(path) - 0.5);
   constexpr double numerical_resolution = 0.0001;
   const double turns = 0.10 * turning + 0.05 * stops;
   return std::floor((length + wheel_travel_cost) / numerical_resolution + 0.5) *

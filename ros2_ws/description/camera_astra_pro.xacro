@@ -9,11 +9,12 @@
     <xacro:property name="astra_horizontal_fov" value="${60.0 * pi / 180.0}"/>
     <xacro:property name="astra_vertical_fov" value="${49.5 * pi / 180.0}"/>
     <xacro:property name="astra_diagonal_fov" value="${73.0 * pi / 180.0}"/>
-    <!-- Laptop-friendly simulation profile. 320 x 240 at 10 Hz preserves the
-         camera geometry while producing 12x fewer pixels per second than
-         640 x 480 at 30 Hz. -->
-    <xacro:property name="astra_image_width" value="320"/>
-    <xacro:property name="astra_image_height" value="240"/>
+    <!-- Keep the simulated depth cloud responsive on the navigation laptop.
+         160 x 120 at 10 Hz preserves the camera FOV and supplies several
+         samples per one-degree obstacle-scan bin while cutting cloud work by
+         four versus the previous 320 x 240 profile. -->
+    <xacro:property name="astra_image_width" value="160"/>
+    <xacro:property name="astra_image_height" value="120"/>
     <xacro:property name="astra_update_rate" value="10"/>
     <xacro:property name="astra_fx"
                     value="${(astra_image_width / 2.0)

@@ -65,13 +65,13 @@ TEST(PathPreference, ShorterTurningRouteBeatsSlightlyLongerSmoothArc)
     tai_robot_one::routePreference({{0, 0, 0}, {1.001, 0, 0}}));
 }
 
-TEST(PathPreference, AvoidsLargeArrivalSpinWhenAlignedRouteIsOnlySlightlyLonger)
+TEST(PathPreference, ShortDirectRouteBeatsLongTerminalApproach)
 {
   const auto short_with_big_pivot = tai_robot_one::routePreference({
     {0, 0, -2.9}, {-2.01, -0.5, -2.9}, {-2.0, -0.5, 0}});
   const auto aligned_with_small_detour = tai_robot_one::routePreference({
     {0, 0, -2.9}, {-2.2, -0.5, -2.9}, {-2.0, -0.5, 0}});
-  EXPECT_LT(aligned_with_small_detour, short_with_big_pivot);
+  EXPECT_LT(short_with_big_pivot, aligned_with_small_detour);
 }
 
 TEST(PathPreference, RejectsEmptyOrNonFiniteRoutes)

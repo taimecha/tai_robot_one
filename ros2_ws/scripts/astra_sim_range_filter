@@ -153,19 +153,20 @@ class AstraSimRangeFilter(Node):
         depth_topic = str(self.get_parameter('depth_topic').value)
         points_topic = str(self.get_parameter('points_topic').value)
 
-        # RViz Image uses a reliable subscription, while Gazebo sensor inputs
-        # are commonly best-effort.  A reliable publisher can serve both the
-        # reliable RViz displays and best-effort Nav2 subscribers.
-        output_qos = QoSProfile(
+        # RViz Image uses a reliable subscription. The large point cloud is a
+        # live sensor stream: reliable delivery can block this single-threaded
+        # executor behind a slow subscriber, delaying both the obstacle scan
+        # and depth callback until Collision Monitor declares the camera stale.
+        depth_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
         self.depth_publisher = self.create_publisher(
-            Image, depth_topic, output_qos)
+            Image, depth_topic, depth_qos)
         self.points_publisher = self.create_publisher(
-            PointCloud2, points_topic, output_qos)
+            PointCloud2, points_topic, qos_profile_sensor_data)
         self.create_subscription(
             Image,
             raw_depth_topic,
