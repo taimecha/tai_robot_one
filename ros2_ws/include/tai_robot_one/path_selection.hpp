@@ -2,15 +2,40 @@
 // SPDX-License-Identifier: Apache-2.0
 #ifndef TAI_ROBOT_ONE__PATH_SELECTION_HPP_
 #define TAI_ROBOT_ONE__PATH_SELECTION_HPP_
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
 #include "tai_robot_one/path_tracking.hpp"
 namespace tai_robot_one
 {
-// Compare length first (0.1 mm numerical buckets), then heading variation
-// and stop-to-turn manoeuvres. A smoother long detour cannot beat a shorter
-// route. Buckets give a strict ordering, unlike pairwise epsilon comparisons.
+// Measure the actual incoming direction 25 cm before the end, ignoring a
+// one-cell kink that a loaded robot cannot track on approach.
+inline double terminalPivotAngle(const std::vector<TrackingPose> & path)
+{
+  if (path.size() < 2) {return std::numeric_limits<double>::infinity();}
+  double final_travel_heading = path.back().yaw;
+  double terminal_prefix = 0.0;
+  for (size_t i = path.size() - 1; i > 0; --i) {
+    const double dx = path[i].x - path[i - 1].x;
+    const double dy = path[i].y - path[i - 1].y;
+    const double segment = std::hypot(dx, dy);
+    if (terminal_prefix + segment >= 0.25 || i == 1) {
+      const double fraction = segment > 1e-9 ?
+        std::min(1.0, (0.25 - terminal_prefix) / segment) : 0.0;
+      const double gx = path.back().x - (path[i].x - fraction * dx);
+      const double gy = path.back().y - (path[i].y - fraction * dy);
+      if (std::hypot(gx, gy) >= 0.005) {
+        final_travel_heading = std::atan2(gy, gx);
+      }
+      break;
+    }
+    terminal_prefix += segment;
+  }
+  return std::abs(wrapAngle(path.back().yaw - final_travel_heading));
+}
+// Penalize terminal turns large enough to produce observed lateral skid drift.
+// Keep route length dominant for small turns and use heading variation for ties.
 inline double routePreference(const std::vector<TrackingPose> & path)
 {
   if (path.size() < 2) {return std::numeric_limits<double>::infinity();}
@@ -29,9 +54,11 @@ inline double routePreference(const std::vector<TrackingPose> & path)
     length += d;
     turning += a;
   }
+  const double wheel_travel_cost = 0.45 * std::max(0.0, terminalPivotAngle(path) - 0.5);
   constexpr double numerical_resolution = 0.0001;
   const double turns = 0.10 * turning + 0.05 * stops;
-  return std::floor(length / numerical_resolution + 0.5) * numerical_resolution +
+  return std::floor((length + wheel_travel_cost) / numerical_resolution + 0.5) *
+         numerical_resolution +
          numerical_resolution * 0.99 * (turns / (1.0 + turns));
 }
 }  // namespace tai_robot_one

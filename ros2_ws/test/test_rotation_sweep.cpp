@@ -65,6 +65,15 @@ TEST(PathPreference, ShorterTurningRouteBeatsSlightlyLongerSmoothArc)
     tai_robot_one::routePreference({{0, 0, 0}, {1.001, 0, 0}}));
 }
 
+TEST(PathPreference, AvoidsLargeArrivalSpinWhenAlignedRouteIsOnlySlightlyLonger)
+{
+  const auto short_with_big_pivot = tai_robot_one::routePreference({
+    {0, 0, -2.9}, {-2.01, -0.5, -2.9}, {-2.0, -0.5, 0}});
+  const auto aligned_with_small_detour = tai_robot_one::routePreference({
+    {0, 0, -2.9}, {-2.2, -0.5, -2.9}, {-2.0, -0.5, 0}});
+  EXPECT_LT(aligned_with_small_detour, short_with_big_pivot);
+}
+
 TEST(PathPreference, RejectsEmptyOrNonFiniteRoutes)
 {
   EXPECT_FALSE(std::isfinite(tai_robot_one::routePreference({})));
@@ -76,6 +85,13 @@ TEST(PathTracking, SmallCellOffsetDoesNotCauseLargeInitialSpin)
 {
   const auto target = tai_robot_one::trackingTarget({
     {0.025, 0.025, 0.0}, {0.075, 0.025, 0.0}, {0.25, 0.0, 0.0}});
+  EXPECT_NEAR(target.initial_angle, 0.0, 1e-9);
+}
+
+TEST(PathTracking, LocalizationShiftNearPlanStartKeepsOutgoingTangent)
+{
+  const auto target = tai_robot_one::trackingTarget({
+    {-0.11, 0.06, 0.0}, {-0.06, 0.06, 0.0}, {0.20, 0.06, 0.0}});
   EXPECT_NEAR(target.initial_angle, 0.0, 1e-9);
 }
 

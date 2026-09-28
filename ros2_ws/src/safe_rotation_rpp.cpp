@@ -57,6 +57,7 @@ public:
     turning_ = false;
     aligning_terminal_yaw_ = false;
     terminal_arrival_seen_ = false;
+    terminal_slow_turn_ = false;
     rotation_blocked_ = false;
     has_reached_xy_tolerance_ = false;
     // Keep a tripped turn guard across FollowPath retries for the same goal.
@@ -91,6 +92,7 @@ public:
       turning_ = false;
       aligning_terminal_yaw_ = false;
       terminal_arrival_seen_ = false;
+      terminal_slow_turn_ = false;
       has_reached_xy_tolerance_ = false;
     }
     // A blocked sweep may be retried only after a fresh global plan.
@@ -157,11 +159,14 @@ public:
     // latching final yaw; proximity at its launch is not terminal arrival.
     const bool at_goal = remaining_length <= 0.15 &&
       std::hypot(end.position.x, end.position.y) < xy_tolerance;
-    // Match the non-stateful goal checker: if the robot drifts outside XY
-    // tolerance during alignment, resume tracking instead of stopping there.
+    // Match the non-stateful goal checker: real or localization drift beyond
+    // XY tolerance during alignment resumes endpoint tracking.
     has_reached_xy_tolerance_ = at_goal;
-    terminal_arrival_seen_ = terminal_arrival_seen_ || at_goal;
     const double goal_yaw_error = wrapAngle(tf2::getYaw(end.orientation));
+    if (at_goal && !terminal_arrival_seen_) {
+      terminal_slow_turn_ = std::abs(goal_yaw_error) <= 1.8;
+    }
+    terminal_arrival_seen_ = terminal_arrival_seen_ || at_goal;
     if (at_goal && std::abs(goal_yaw_error) > yaw_tolerance) {
       aligning_terminal_yaw_ = true;
     }
@@ -221,7 +226,7 @@ public:
     if (remaining_length <= 0.15) {
       RCLCPP_DEBUG_THROTTLE(logger_, *costmap_ros_->get_clock(), 1000,
         "terminal xy=(%.3f,%.3f) yaw=%.3f remaining=%.3f at=%d align=%d turning=%d angle=%.3f error=%.3f",
-        end.position.x, end.position.y, yaw, remaining_, at_goal,
+        end.position.x, end.position.y, yaw, remaining_length, at_goal,
         aligning_terminal_yaw_, turning_, angle, goal_yaw_error);
     }
     const double threshold = goal_rotation ? yaw_tolerance :
@@ -276,15 +281,23 @@ public:
       if (remaining_ * velocity.angular.z < 0.0 && std::abs(velocity.angular.z) > 0.02) {
         return command;
       }
+      // Near a terminal pose, the skid-steer chassis drifts laterally during
+      // a pivot. Hold the measured reliable 0.20 rad/s turn rate here instead
+      // of using 0.30 rad/s and then requiring two corrective turns.
+      constexpr double kMinimumLoadedAngularSpeed = 0.20;
+      const bool terminal_turn = terminal_slow_turn_ && remaining_length <= 0.25 &&
+        std::hypot(end.position.x, end.position.y) <= 0.25;
+      const double angular_limit = terminal_turn ?
+        std::min(params_->rotate_to_heading_angular_vel, kMinimumLoadedAngularSpeed) :
+        params_->rotate_to_heading_angular_vel;
       double angular = std::copysign(
-        std::min(params_->rotate_to_heading_angular_vel,
+        std::min(angular_limit,
         std::sqrt(2.0 * params_->max_angular_accel * std::abs(remaining_))), remaining_);
       angular = std::clamp(angular,
         velocity.angular.z - params_->max_angular_accel * control_duration_,
         velocity.angular.z + params_->max_angular_accel * control_duration_);
       // Requested lower active-turn floor. Keep an exact zero at completion;
       // validate that 0.20 rad/s still overcomes loaded skid-steer friction.
-      constexpr double kMinimumLoadedAngularSpeed = 0.20;
       angular = std::copysign(
         std::max(std::abs(angular), kMinimumLoadedAngularSpeed), angular);
       if (collision_checker_->isCollisionImminent(pose, 0.0, angular, 0.0)) {
@@ -358,6 +371,7 @@ private:
   bool turning_{false};
   bool aligning_terminal_yaw_{false};
   bool terminal_arrival_seen_{false};
+  bool terminal_slow_turn_{false};
   bool rotation_blocked_{false};
   bool turn_limit_exceeded_{false};
   bool have_goal_{false};

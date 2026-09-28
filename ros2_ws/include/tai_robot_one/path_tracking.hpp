@@ -78,7 +78,7 @@ inline TrackingTarget trackingTarget(const std::vector<TrackingPose> & path)
   // Near the route, follow its immediate travel tangent. Stop at an
   // unfinished rotation primitive rather than looking through that turn.
   if (path.size() > travel_start + 1 &&
-    (travel_start > 0 || std::hypot(path.front().x, path.front().y) <= 0.10))
+    (travel_start > 0 || std::hypot(path.front().x, path.front().y) <= 0.25))
   {
     for (size_t i = travel_start + 1; i < path.size(); ++i) {
       const double dx = path[i].x - path[i - 1].x;

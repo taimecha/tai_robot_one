@@ -247,15 +247,25 @@ TEST_F(FootprintBTTest, PreparedArrivalAlignsAtAcceptedXYWithoutExtraTranslation
   EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
 }
 
-TEST_F(FootprintBTTest, AlignsBeforeFinalTwentyCentimetersOnLongRoutes)
+TEST_F(FootprintBTTest, SlightlyFutureFootprintStampDoesNotCancelClearRoute)
+{
+  connect();
+  body.header.frame_id = "map";
+  body.header.stamp = node->now() + rclcpp::Duration::from_seconds(0.07);
+  footprint->publish(body);
+  rclcpp::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+}
+
+TEST_F(FootprintBTTest, SafeTerminalPivotDoesNotForceLongerAlignedRoute)
 {
   auto path = board->get<nav_msgs::msg::Path>("path");
   path.poses.back().pose.orientation.z = std::sin(.5 / 2);
   path.poses.back().pose.orientation.w = std::cos(.5 / 2);
   board->set("path", path);
   connect();
-  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
-  // A local 20 cm correction may still finish with a checked yaw turn.
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  // A local 20 cm correction also finishes with a checked yaw turn.
   path.poses.front().pose.position.x = .7;
   board->set("path", path);
   EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
@@ -954,6 +964,34 @@ TEST_F(FootprintBTTest, ClearOneMetreGoalStaysStraight)
   EXPECT_DOUBLE_EQ(path.poses.back().pose.position.x, 1.0);
 }
 
+TEST_F(FootprintBTTest, GridRouteWithDifferentGoalYawUsesCheckedTerminalPivot)
+{
+  nav_msgs::msg::Path raw;
+  raw.header.frame_id = "map";
+  geometry_msgs::msg::PoseStamped start, goal;
+  start.header.frame_id = goal.header.frame_id = "map";
+  start.pose.orientation.w = 1.0;
+  goal.pose.position.x = 0.90;
+  goal.pose.orientation.z = std::sin(M_PI / 4.0);
+  goal.pose.orientation.w = std::cos(M_PI / 4.0);
+  raw.poses = {start, goal};
+  board->set("path", raw);
+  board->set("goal", goal);
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear path='{path}' goal='{goal}' planner_id='GridShortest' "
+    "checked_path='{checked}'/></BehaviorTree></root>", board);
+  connect();
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  // The line itself remains clear; this cell obstructs the final 90 deg spin.
+  const auto ix = static_cast<size_t>((0.875 + 2.0) / 0.025);
+  const auto iy = static_cast<size_t>((0.700 + 2.0) / 0.025);
+  map.data[iy * 160 + ix] = 254;
+  publish();
+  rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+}
+
 TEST_F(FootprintBTTest, OffsetGoalOffersCheckedPivotStraightAndFinalTurn)
 {
   selectMotion("direct");
@@ -1616,10 +1654,11 @@ class SyntheticForwardProposal : public BT::StatefulActionNode
 {
 public:
   using BT::StatefulActionNode::StatefulActionNode;
-  static inline bool blocked = false, planning = false, detours = false;
+  static inline bool blocked = false, planning = false, detours = false, block_direct = false;
   static inline int cancels = 0;
   static inline std::vector<double> distances;
   static inline std::vector<std::string> requests;
+  static inline double goal_yaw = 0.0;
   static BT::PortsList providedPorts()
   {
     return {BT::InputPort<double>("distance"), BT::InputPort<std::string>("request", "", "Planner"),
@@ -1637,7 +1676,9 @@ public:
 private:
   BT::NodeStatus finish()
   {
-    if (blocked) {return BT::NodeStatus::FAILURE;}
+    if (blocked || (block_direct && getInput<std::string>("request").value() == "Direct")) {
+      return BT::NodeStatus::FAILURE;
+    }
     const double d = getInput<double>("distance").value();
     nav_msgs::msg::Path path;
     path.header.frame_id = "map";
@@ -1653,6 +1694,7 @@ private:
       // the shortest route last; first-success planning must not accept arcs.
       const double extra = request == "Direct" ? 6.0 :
         request == "DirectArc" ? 5.0 :
+        request == "GridShortest" ? 4.5 :
         request == "GridBased" ? 4.0 : request == "SE2Arc" ? 2.0 : 0.0;
       path.poses.back().pose.position.x += extra;
     }
@@ -1662,6 +1704,8 @@ private:
       middle.pose.position.y = 2.0;
       path.poses.insert(path.poses.end() - 1, middle);
     }
+    path.poses.back().pose.orientation.z = std::sin(goal_yaw / 2.0);
+    path.poses.back().pose.orientation.w = std::cos(goal_yaw / 2.0);
     setOutput("path", path);
     setOutput("planner", request.empty() ? std::string("SE2Fallback") : request);
     return BT::NodeStatus::SUCCESS;
@@ -1713,8 +1757,10 @@ protected:
     FootprintBTTest::SetUp();
     SyntheticForwardProposal::blocked = SyntheticForwardProposal::planning =
       SyntheticForwardProposal::detours = false;
+    SyntheticForwardProposal::block_direct = false;
     SyntheticForwardProposal::cancels = 0; SyntheticForwardProposal::distances.clear();
     SyntheticForwardProposal::requests.clear();
+    SyntheticForwardProposal::goal_yaw = 0.0;
     CheckRankedRoute::reject_best = false; CheckRankedRoute::checked.clear();
     ExecuteRankedRoute::fail_first = ExecuteRankedRoute::fail_all =
       ExecuteRankedRoute::running = false;
@@ -1757,7 +1803,7 @@ TEST_F(ForwardSearchBTTest, CurrentPoseComparesAllPlannersAndChoosesShortestLast
     "</RankedRouteSearch></BehaviorTree></root>", board);
   EXPECT_EQ(complete(), BT::NodeStatus::SUCCESS);
   EXPECT_EQ(SyntheticForwardProposal::requests,
-    (std::vector<std::string>{"Direct", "DirectArc", "GridBased", "SE2Arc",
+    (std::vector<std::string>{"Direct", "DirectArc", "GridShortest", "GridBased", "SE2Arc",
       "SE2Fallback"}));
   ASSERT_EQ(ExecuteRankedRoute::executed.size(), 1u);
   EXPECT_DOUBLE_EQ(ExecuteRankedRoute::executed[0], 2.0);
@@ -1815,16 +1861,16 @@ TEST_F(ForwardSearchBTTest, LongCurrentPoseDetourIsComparedWithForwardDepartures
     "path='{candidate}' planner='{candidate_planner}'/>"
     "<CheckRankedRoute path='{selected}'/><ExecuteRankedRoute path='{selected}'/>"
     "</RankedRouteSearch></BehaviorTree></root>", board);
-  for (int i = 0; i < 38; ++i) {
+  for (int i = 0; i < 39; ++i) {
     EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::RUNNING);
     EXPECT_TRUE(ExecuteRankedRoute::executed.empty());
   }
   EXPECT_EQ(complete(), BT::NodeStatus::SUCCESS);
-  ASSERT_EQ(SyntheticForwardProposal::distances.size(), 38u);
+  ASSERT_EQ(SyntheticForwardProposal::distances.size(), 39u);
   EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[0], 0.0);
-  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[5], .15);
-  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[28], 1.20);
-  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[29], .25);
+  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[6], .15);
+  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[29], 1.20);
+  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[30], .25);
   EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances.back(), .75);
   ASSERT_EQ(ExecuteRankedRoute::executed.size(), 1u);
   EXPECT_DOUBLE_EQ(ExecuteRankedRoute::executed[0], 1.0);
@@ -1877,7 +1923,46 @@ TEST_F(ForwardSearchBTTest, ShortCurrentPoseRoutesDoNotTriggerExtraDepartureSear
     "<CheckRankedRoute path='{selected}'/><ExecuteRankedRoute path='{selected}'/>"
     "</RankedRouteSearch></BehaviorTree></root>", board);
   EXPECT_EQ(complete(), BT::NodeStatus::SUCCESS);
-  EXPECT_EQ(SyntheticForwardProposal::distances.size(), 5u);
+  EXPECT_EQ(SyntheticForwardProposal::distances.size(), 6u);
+}
+
+TEST_F(ForwardSearchBTTest, LargeTerminalPivotComparesAlignedApproachesWithoutForwardDetours)
+{
+  SyntheticForwardProposal::goal_yaw = 1.2;
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<RankedRouteSearch forward_search='false' explore_forward_detours='true' "
+    "explore_goal_approaches='true' candidate_distance='{distance}' "
+    "candidate_planner_request='{request}' candidate_departure_mode='{mode}' "
+    "candidate_path='{candidate}' candidate_planner='{candidate_planner}' "
+    "controller_error='{controller}' path='{selected}' planner_id='{selected_planner}'>"
+    "<SyntheticForwardProposal distance='{distance}' request='{request}' "
+    "path='{candidate}' planner='{candidate_planner}'/>"
+    "<CheckRankedRoute path='{selected}'/><ExecuteRankedRoute path='{selected}'/>"
+    "</RankedRouteSearch></BehaviorTree></root>", board);
+  EXPECT_EQ(complete(), BT::NodeStatus::SUCCESS);
+  ASSERT_EQ(SyntheticForwardProposal::distances.size(), 15u);
+  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[6], .25);
+  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances.back(), .75);
+}
+
+TEST_F(ForwardSearchBTTest, BlockedDirectLineDoesNotAddAlignedApproachDetour)
+{
+  SyntheticForwardProposal::goal_yaw = 1.2;
+  SyntheticForwardProposal::block_direct = true;
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<RankedRouteSearch forward_search='false' explore_forward_detours='true' "
+    "explore_goal_approaches='true' candidate_distance='{distance}' "
+    "candidate_planner_request='{request}' candidate_path='{candidate}' "
+    "candidate_planner='{candidate_planner}' controller_error='{controller}' "
+    "path='{selected}' planner_id='{selected_planner}'>"
+    "<SyntheticForwardProposal distance='{distance}' request='{request}' "
+    "path='{candidate}' planner='{candidate_planner}'/>"
+    "<CheckRankedRoute path='{selected}'/><ExecuteRankedRoute path='{selected}'/>"
+    "</RankedRouteSearch></BehaviorTree></root>", board);
+  EXPECT_EQ(complete(), BT::NodeStatus::SUCCESS);
+  EXPECT_EQ(SyntheticForwardProposal::distances.size(), 6u);
 }
 
 TEST_F(ForwardSearchBTTest, PrimaryFailureRequestsFreshPlanningBeforeLongerStoredRoutes)
@@ -1943,14 +2028,14 @@ TEST_F(ForwardSearchBTTest, ChangedGoalCancelsExecutionAndRanksFreshRoutes)
     "</RankedRouteSearch></BehaviorTree></root>", board);
   ExecuteRankedRoute::running = true;
   for (int i = 0; i < 8; ++i) {EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::RUNNING);}
-  ASSERT_EQ(SyntheticForwardProposal::requests.size(), 5u);
+  ASSERT_EQ(SyntheticForwardProposal::requests.size(), 6u);
   auto goal = board->get<geometry_msgs::msg::PoseStamped>("goal");
   goal.pose.position.y += 1.0;
   board->set("goal", goal);
   EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::RUNNING);
-  EXPECT_EQ(SyntheticForwardProposal::requests.size(), 6u);
+  EXPECT_EQ(SyntheticForwardProposal::requests.size(), 7u);
   for (int i = 0; i < 8; ++i) {EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::RUNNING);}
-  EXPECT_EQ(SyntheticForwardProposal::requests.size(), 10u);
+  EXPECT_EQ(SyntheticForwardProposal::requests.size(), 12u);
   EXPECT_EQ(ExecuteRankedRoute::executed.size(), 2u);
 }
 

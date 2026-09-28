@@ -23,7 +23,10 @@ def main():
         'round_trip', 'south_pillar', 'escape_only', 'west_wall_escape',
         'recent_goals', 'latest_short_route', 'latest_return_only',
         'latest_turn_escape', 'latest_rack_pair', 'latest_rack_second',
-        'latest_open_pair'], default='round_trip')
+        'latest_open_pair', 'latest_three_goals', 'latest_first_goal',
+        'latest_second_goal', 'latest_second_third'], default='round_trip')
+    parser.add_argument('--goal-timeout', type=float, default=180.0,
+                        help='Wall-clock timeout for each goal in seconds')
     args = parser.parse_args()
     rclpy.init()
     node = rclpy.create_node('nav_round_trip_test', parameter_overrides=[
@@ -90,6 +93,22 @@ def main():
         # Last two open-area RViz goals. Launch at (2.01, 2.96, 0.0).
         goals = [(.005374, 3.000527, -1.571597),
                  (1.984534, 2.998942, -.782277)]
+    elif args.scenario == 'latest_three_goals':
+        # RViz goals from the 2026-09-28 navigation log. Launch at
+        # (1.99, 2.96, -0.778) to reproduce the two-pillar departure.
+        goals = [(.021212, .405289, -.000801),
+                 (.162211, 2.491690, -.000801),
+                 (-.172655, .019487, -.011582)]
+    elif args.scenario == 'latest_first_goal':
+        # Launch at (1.99, 2.96, -0.778) for the two-pillar crossing.
+        goals = [(.021212, .405289, -.000801)]
+    elif args.scenario == 'latest_second_goal':
+        # Launch at (.054, .424, -.025), the measured first-goal arrival.
+        goals = [(.162211, 2.491690, -.000801)]
+    elif args.scenario == 'latest_second_third':
+        # Launch at the measured first-goal arrival (.023, .431, -.067).
+        goals = [(.162211, 2.491690, -.000801),
+                 (-.172655, .019487, -.011582)]
     elif args.scenario == 'recent_goals':
         # Replay the recent rack-side / origin XY positions with an explicit
         # horizontal final heading. Original RViz arrow headings were not logged.
@@ -118,7 +137,7 @@ def main():
         start = time.monotonic()
         next_report = start + 15
         print(json.dumps({'leg': leg, 'goal': [x, y, yaw], 'event': 'started'}), flush=True)
-        while not result.done() and time.monotonic() - start < 180:
+        while not result.done() and time.monotonic() - start < args.goal_timeout:
             rclpy.spin_once(node, timeout_sec=0.1)
             if time.monotonic() > next_report:
                 print(json.dumps({'leg': leg, 'event': 'progress', **feedback}), flush=True)

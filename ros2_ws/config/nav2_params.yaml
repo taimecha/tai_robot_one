@@ -4,11 +4,14 @@
 amcl:
   ros__parameters:
     use_sim_time: true
-    alpha1: 0.2
-    alpha2: 0.2
-    alpha3: 0.2
-    alpha4: 0.2
-    alpha5: 0.2
+    # The fused wheel/IMU odometry stays nearly fixed during an in-place
+    # pivot. Large motion noise let AMCL move map->odom by 10-20 cm there,
+    # repeatedly pulling the robot out of the 4 cm goal tolerance.
+    alpha1: 0.03
+    alpha2: 0.03
+    alpha3: 0.03
+    alpha4: 0.03
+    alpha5: 0.03
     base_frame_id: base_footprint
     global_frame_id: map
     odom_frame_id: odom
@@ -100,6 +103,10 @@ controller_server:
       yaw_goal_tolerance: 0.0872664626
     FollowPath:
       plugin: tai_robot_one::SafeRotationRPP
+      # Keep pruning near the traveled prefix. A grid path can pass near its
+      # start later; the RPP default (half the 5 m local map) then jumps to
+      # that later section and repeatedly spins toward changing tangents.
+      max_robot_pose_search_dist: 0.30
       # Conservative loaded-hardware speed; 0.30 m/s accelerated too abruptly
       # at the beginning of short real-world goals.
       desired_linear_vel: 0.20
@@ -339,7 +346,22 @@ planner_server:
     expected_planner_frequency: 5.0
     # Compare body-checked XY, arc and lattice routes by length before motion.
     # Plugin order is search order, not a preference for arcs or stationary turns.
-    planner_plugins: [GridBased, SE2Arc, SE2Fallback]
+    planner_plugins: [GridShortest, GridBased, SE2Arc, SE2Fallback]
+    GridShortest:
+      # Low cost bias offers the shortest clear route through open gaps.
+      # The body validator checks every pose; GridBased remains a wider option.
+      plugin: nav2_smac_planner::SmacPlanner2D
+      tolerance: 0.05
+      allow_unknown: true
+      downsample_costmap: false
+      downsampling_factor: 1
+      max_iterations: 100000
+      max_on_approach_iterations: 1000
+      max_planning_time: 3.0
+      cost_travel_multiplier: 1.0
+      cache_obstacle_heuristic: false
+      smooth_path: false
+      debug_visualizations: false
     GridBased:
       plugin: nav2_smac_planner::SmacPlanner2D
       tolerance: 0.05

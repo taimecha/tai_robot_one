@@ -115,9 +115,13 @@
       <Sequence name="CompareRoutesWithoutMotion">
         <PathFootprintClear data_only="true"/>
         <Switch3 variable="{route_departure_mode}" case_1="current" case_2="forward" case_3="approach">
-          <Switch5 variable="{route_planner_request}" case_1="Direct" case_2="DirectArc" case_3="GridBased" case_4="SE2Arc" case_5="SE2Fallback">
+          <Switch6 variable="{route_planner_request}" case_1="Direct" case_2="DirectArc" case_3="GridShortest" case_4="GridBased" case_5="SE2Arc" case_6="SE2Fallback">
             <PathFootprintClear motion="direct" goal="{goal}" checked_path="{route_candidate_path}" path_planner="{route_candidate_planner}" blocked_near_robot="{local_escape_required}"/>
             <PathFootprintClear motion="direct_arc" goal="{goal}" checked_path="{route_candidate_path}" path_planner="{route_candidate_planner}" blocked_near_robot="{local_escape_required}"/>
+            <Sequence>
+              <ComputePathToPose goal="{goal}" path="{route_candidate_path}" planner_id="GridShortest" error_code_id="{compute_path_error_code}"/>
+              <PathFootprintClear path="{route_candidate_path}" goal="{goal}" planner_id="GridShortest" checked_path="{route_candidate_path}" path_planner="{route_candidate_planner}" blocked_near_robot="{local_escape_required}"/>
+            </Sequence>
             <Sequence>
               <ComputePathToPose goal="{goal}" path="{route_candidate_path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
               <PathFootprintClear path="{route_candidate_path}" goal="{goal}" planner_id="GridBased" checked_path="{route_candidate_path}" path_planner="{route_candidate_planner}" blocked_near_robot="{local_escape_required}"/>
@@ -131,7 +135,7 @@
               <PathFootprintClear path="{route_candidate_path}" goal="{goal}" planner_id="SE2Fallback" checked_path="{route_candidate_path}" path_planner="{route_candidate_planner}" blocked_near_robot="{local_escape_required}"/>
             </Sequence>
             <AlwaysFailure/>
-          </Switch5>
+          </Switch6>
           <Sequence name="CompareForwardDepartureBeforeAcceptingDetour">
             <PathFootprintClear motion="forward_candidate" goal="{goal}" candidate_distance="{route_departure_distance}" forward_start="{route_departure_start}"/>
             <ComputePathToPose goal="{goal}" start="{route_departure_start}" use_start="true" path="{route_candidate_path}" planner_id="{route_planner_request}" error_code_id="{compute_path_error_code}"/>

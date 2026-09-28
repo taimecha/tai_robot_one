@@ -206,9 +206,22 @@ public:
       odom_pose.pose.position.y = odom_robot.transform.translation.y;
       odom_pose.pose.orientation = odom_robot.transform.rotation;
       tf2::doTransform(odom_pose, map_pose, odom_to_map);
-      const auto footprint_tf = tf_->lookupTransform(
-        "base_footprint", footprint_->header.frame_id,
-        rclcpp::Time(footprint_->header.stamp));
+      geometry_msgs::msg::TransformStamped footprint_tf;
+      try {
+        footprint_tf = tf_->lookupTransform(
+          "base_footprint", footprint_->header.frame_id,
+          rclcpp::Time(footprint_->header.stamp));
+      } catch (const tf2::ExtrapolationException &) {
+        // The costmap can publish its footprint a control tick ahead of the
+        // latest odometry TF. Rejecting a currently followed route for that
+        // small scheduling gap causes a needless halt and fresh plan.
+        const auto latest = tf_->lookupTransform(
+          "base_footprint", footprint_->header.frame_id, tf2::TimePointZero);
+        const double lead = (rclcpp::Time(footprint_->header.stamp) -
+          rclcpp::Time(latest.header.stamp)).seconds();
+        if (lead < 0.0 || lead > 0.15) {throw;}
+        footprint_tf = latest;
+      }
       nav2_costmap_2d::Footprint body;
       for (const auto & p : footprint_->polygon.points) {
         geometry_msgs::msg::PointStamped in, out;
@@ -341,7 +354,8 @@ public:
         const auto planner_id = geometric_direct ?
           std::string(direct ? "Direct" : "DirectArc") :
           getInput<std::string>("planner_id").value();
-        if (planner_id == "GridBased" && !getInput<bool>("prepared").value()) {
+        const bool grid_planner = planner_id == "GridBased" || planner_id == "GridShortest";
+        if (grid_planner && !getInput<bool>("prepared").value()) {
           // Smac2D short paths can contain default/identity quaternions.
           // XY-only planning has no in-place orientation primitives: derive
           // travel headings from geometry, retaining the requested goal yaw.
@@ -372,7 +386,7 @@ public:
             }
           }
         }
-        if (!geometric_direct && planner_id != "GridBased" &&
+        if (!geometric_direct && !grid_planner &&
           !getInput<bool>("prepared").value()) {
           geometry_msgs::msg::PoseStamped goal;
           if (approach_route) {(void)getInput("candidate_start", goal);}
@@ -499,23 +513,9 @@ public:
         const auto & end = path.poses.back().pose;
         const double gx = end.position.x, gy = end.position.y;
         const double goal_yaw = tf2::getYaw(end.orientation);
-        // A large heading change in the final 20 cm is fragile on this
-        // skid-steer base: a few centimetres of drift then demand a blocked
-        // point turn at the rack. Align earlier and enter on the goal heading.
-        if (!direct && std::hypot(path.poses.front().pose.position.x - gx,
-            path.poses.front().pose.position.y - gy) > .35)
-        {
-          for (size_t i = path.poses.size() - 1; i-- > 0;) {
-            const auto & p = path.poses[i].pose;
-            if (std::hypot(p.position.x - gx, p.position.y - gy) < .20) {continue;}
-            if (std::abs(wrapAngle(goal_yaw - tf2::getYaw(p.orientation))) > .35) {
-              RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 3000,
-                "Route changes heading too much in final 20 cm; compare aligned approaches");
-              return BT::NodeStatus::FAILURE;
-            }
-            break;
-          }
-        }
+        // Do not reject a short XY route merely because its travel heading
+        // differs from goal yaw. The full-body rotation sweep at the first
+        // accepted XY below determines whether a terminal pivot is safe.
         bool outside = std::hypot(path.poses.front().pose.position.x - gx,
             path.poses.front().pose.position.y - gy) > goal_xy_tolerance + .005;
         for (size_t i = 1; i < path.poses.size(); ++i) {
@@ -1451,7 +1451,7 @@ public:
     const bool forward = getInput<bool>("forward_search").value();
     const bool compare = getInput<bool>("compare_planners").value();
     const size_t planners_per_start = compare ? 3 : 1;
-    constexpr size_t current_count = 5;
+    constexpr size_t current_count = 6;
     constexpr size_t forward_count = 8 * 3;
     constexpr size_t approach_begin = current_count + forward_count;
     if (!forward && phase_ == Phase::SEARCH && proposal_ == current_count &&
@@ -1477,9 +1477,29 @@ public:
           "Current-pose route is a detour (%.3f m vs %.3f m direct); compare forward starts before moving",
           shortest, direct_distance);
       }
+      if (getInput<bool>("explore_goal_approaches").value()) {
+        const auto direct = std::find_if(choices_.begin(), choices_.end(),
+            [](const Choice & choice) {return choice.planner == "Direct";});
+        if (choices_.empty()) {
+          search_approach_ = true;
+        } else if (direct != choices_.end() && direct->length > 0.5) {
+          std::vector<TrackingPose> poses;
+          for (const auto & p : direct->path.poses) {
+            poses.push_back({p.pose.position.x, p.pose.position.y,
+                tf2::getYaw(p.pose.orientation)});
+          }
+          search_approach_ = terminalPivotAngle(poses) > 0.6;
+        }
+        if (search_approach_ && !search_forward_) {
+          // Compare aligned arrivals without paying for unrelated forward
+          // departure trials on a short, already-clear current-pose route.
+          proposal_ = approach_begin;
+        }
+      }
     }
     const size_t proposal_count = forward ? 8 * planners_per_start :
-      (search_forward_ ? (getInput<bool>("explore_goal_approaches").value() ?
+      (search_forward_ || search_approach_ ?
+      (getInput<bool>("explore_goal_approaches").value() ?
       approach_begin + 9 : approach_begin) : current_count);
     setStatus(BT::NodeStatus::RUNNING);
     if (phase_ == Phase::SEARCH) {
@@ -1500,6 +1520,8 @@ public:
           .25 * ((proposal_ - approach_begin) / 3 + 1) :
           (forward_proposal ? 0.15 * (forward_index / count_per_start + 1) : 0.0);
         const std::vector<std::string> planners = {"GridBased", "SE2Arc", "SE2Fallback"};
+        const std::vector<std::string> current_planners = {
+          "Direct", "DirectArc", "GridShortest", "GridBased", "SE2Arc", "SE2Fallback"};
         setOutput("candidate_distance", departure);
         setOutput("candidate_departure_mode", std::string(approach_proposal ? "approach" :
           (forward_proposal ? "forward" : "current")));
@@ -1507,8 +1529,7 @@ public:
           planners[(proposal_ - approach_begin) % 3] :
           (forward_proposal ?
           planners[forward_index % count_per_start] :
-          (proposal_ == 0 ? std::string("Direct") :
-          (proposal_ == 1 ? std::string("DirectArc") : planners[proposal_ - 2]))));
+          current_planners[proposal_]));
         const auto result = children_nodes_[0]->executeTick();
         if (result == BT::NodeStatus::RUNNING) {return result;}
         if (result == BT::NodeStatus::SUCCESS) {
@@ -1528,8 +1549,8 @@ public:
                 getInput<std::string>("candidate_planner").value(), score, length,
                 std::max(1.0, departure + 0.05)});
             RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
-              "Checked candidate: departure %.2f m, planner %s, length %.3f m",
-              departure, choices_.back().planner.c_str(), length);
+              "Checked candidate: departure %.2f m, planner %s, length %.3f m, motion score %.3f m",
+              departure, choices_.back().planner.c_str(), length, score);
           }
         }
         haltChild(0);
@@ -1555,7 +1576,8 @@ public:
         }
       }
       RCLCPP_INFO(rclcpp::get_logger("forward_route_search"),
-        "Route search found %zu complete body-checked candidates; shortest first", choices_.size());
+        "Route search found %zu complete body-checked candidates; lowest motion score first",
+        choices_.size());
       phase_ = Phase::VALIDATE;
     }
     if (selected_ >= choices_.size()) {return finish(BT::NodeStatus::FAILURE);}
@@ -1636,6 +1658,7 @@ private:
     deadline_ = {};
     goal_seen_ = false;
     search_forward_ = false;
+    search_approach_ = false;
   }
   struct Choice {
     nav_msgs::msg::Path path;
@@ -1648,7 +1671,7 @@ private:
   std::vector<Choice> choices_;
   std::chrono::steady_clock::time_point deadline_;
   geometry_msgs::msg::PoseStamped goal_;
-  bool goal_seen_{false}, search_forward_{false};
+  bool goal_seen_{false}, search_forward_{false}, search_approach_{false};
 };
 
 // Asynchronously prime the shared cache before ANY planner/controller/recovery
