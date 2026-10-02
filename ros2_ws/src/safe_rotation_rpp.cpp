@@ -66,6 +66,13 @@ public:
 
   void setPlan(const nav_msgs::msg::Path & path) override
   {
+    std::vector<TrackingPose> poses;
+    for (const auto & p : path.poses) {
+      poses.push_back({p.pose.position.x, p.pose.position.y, tf2::getYaw(p.pose.orientation)});
+    }
+    const bool reverse = shortReversePath(poses);
+    if (reverse != short_reverse_plan_) {turning_ = false;}
+    short_reverse_plan_ = reverse;
     bool new_goal = false;
     if (!path.poses.empty()) {
       const auto & goal = path.poses.back().pose;
@@ -152,7 +159,8 @@ public:
           tf2::getYaw(p.pose.orientation)});
     }
     const auto target = trackingTarget(tracking_poses);
-    double angle = target.at_turn ? target.planned_turn : target.initial_angle;
+    double angle = target.at_turn ? target.planned_turn :
+      wrapAngle(target.initial_angle + (short_reverse_plan_ ? kPi : 0.0));
     const auto & end = plan.poses.back().pose;
     double remaining_length = 0.0;
     for (size_t i = 1; i < plan.poses.size(); ++i) {
@@ -162,12 +170,25 @@ public:
     }
     // A route leaving a nearby goal to align must finish its travel before
     // latching final yaw; proximity at its launch is not terminal arrival.
+    const double goal_yaw_error = wrapAngle(tf2::getYaw(end.orientation));
+    const double goal_xy_error = std::hypot(end.position.x, end.position.y);
+    // A straight route may enter the 5 cm XY disk where the final pivot is
+    // blocked, yet have a clear last few centimetres and a clear pivot at
+    // the exact endpoint. Keep tracking that short line before turning.
+    const bool defer_terminal_pivot = remaining_length <= 0.15 &&
+      goal_xy_error < xy_tolerance && goal_xy_error > 0.015 &&
+      end.position.x > 0.015 && std::abs(end.position.y) < 0.9 * xy_tolerance &&
+      std::abs(goal_yaw_error) > yaw_tolerance &&
+      !sweepClear(pose, yaw, goal_yaw_error);
+    if (defer_terminal_pivot) {
+      turning_ = false;
+      aligning_terminal_yaw_ = false;
+    }
     const bool at_goal = remaining_length <= 0.15 &&
-      std::hypot(end.position.x, end.position.y) < xy_tolerance;
+      goal_xy_error < xy_tolerance && !defer_terminal_pivot;
     // Match the non-stateful goal checker: real or localization drift beyond
     // XY tolerance during alignment resumes endpoint tracking.
     has_reached_xy_tolerance_ = at_goal;
-    const double goal_yaw_error = wrapAngle(tf2::getYaw(end.orientation));
     if (at_goal && !terminal_arrival_seen_) {
       terminal_slow_turn_ = std::abs(goal_yaw_error) <= 1.8;
     }
@@ -188,7 +209,8 @@ public:
       // After skid/localization drift during the final pivot, the old line
       // tangent can point away from the goal. Rejoin the exact endpoint using
       // its current bearing instead of repeatedly rotating toward that tangent.
-      angle = std::atan2(end.position.y, end.position.x);
+      angle = wrapAngle(std::atan2(end.position.y, end.position.x) +
+        (short_reverse_plan_ ? kPi : 0.0));
     }
     if (has_reached_xy_tolerance_ || aligning_terminal_yaw_) {
       angle = goal_yaw_error;
@@ -226,7 +248,8 @@ public:
     }
     const bool continue_terminal_tracking = !target.at_turn &&
       canApproachGoalWithoutStationaryTurn(
-      end.position.x, end.position.y, remaining_length, xy_tolerance);
+      short_reverse_plan_ ? -end.position.x : end.position.x,
+      short_reverse_plan_ ? -end.position.y : end.position.y, remaining_length, xy_tolerance);
     const bool goal_rotation = has_reached_xy_tolerance_ || aligning_terminal_yaw_;
     if (remaining_length <= 0.15) {
       RCLCPP_DEBUG_THROTTLE(logger_, *costmap_ros_->get_clock(), 1000,
@@ -287,13 +310,14 @@ public:
         return command;
       }
       // Near a terminal pose, the skid-steer chassis drifts laterally during
-      // a pivot. Hold the measured reliable 0.20 rad/s turn rate here instead
-      // of using 0.30 rad/s and then requiring two corrective turns.
-      constexpr double kMinimumLoadedAngularSpeed = 0.20;
+      // a pivot. Increase the final correction modestly while keeping it
+      // below the normal heading-alignment rate.
+      constexpr double kMinimumLoadedAngularSpeed = 0.22;
+      constexpr double kTerminalAngularLimit = 0.24;
       const bool terminal_turn = terminal_slow_turn_ && remaining_length <= 0.25 &&
         std::hypot(end.position.x, end.position.y) <= 0.25;
       const double angular_limit = terminal_turn ?
-        std::min(params_->rotate_to_heading_angular_vel, kMinimumLoadedAngularSpeed) :
+        std::min(params_->rotate_to_heading_angular_vel, kTerminalAngularLimit) :
         params_->rotate_to_heading_angular_vel;
       double angular = std::copysign(
         std::min(angular_limit,
@@ -301,8 +325,7 @@ public:
       angular = std::clamp(angular,
         velocity.angular.z - params_->max_angular_accel * control_duration_,
         velocity.angular.z + params_->max_angular_accel * control_duration_);
-      // Requested lower active-turn floor. Keep an exact zero at completion;
-      // validate that 0.20 rad/s still overcomes loaded skid-steer friction.
+      // Keep an exact zero at completion and a reliable active-turn floor.
       angular = std::copysign(
         std::max(std::abs(angular), kMinimumLoadedAngularSpeed), angular);
       if (collision_checker_->isCollisionImminent(pose, 0.0, angular, 0.0)) {
@@ -313,6 +336,12 @@ public:
       return command;
     }
     if (has_reached_xy_tolerance_) {
+      geometry_msgs::msg::TwistStamped stop;
+      stop.header = pose.header;
+      return stop;
+    }
+    if ((short_reverse_plan_ && velocity.linear.x > .02) ||
+      (!short_reverse_plan_ && velocity.linear.x < -.02)) {
       geometry_msgs::msg::TwistStamped stop;
       stop.header = pose.header;
       return stop;
@@ -340,6 +369,7 @@ public:
       applyConstraints(curvature, velocity,
         collision_checker_->costAtPose(pose.pose.position.x, pose.pose.position.y),
         plan, linear, sign);
+      if (short_reverse_plan_) {linear = -std::min(linear, 0.08);}
       const double angular = linear * curvature;
       const double carrot_distance = std::hypot(p.x, p.y);
       if (!params_->use_collision_detection ||
@@ -374,6 +404,7 @@ private:
     });
   }
   bool turning_{false};
+  bool short_reverse_plan_{false};
   bool aligning_terminal_yaw_{false};
   bool terminal_arrival_seen_{false};
   bool terminal_slow_turn_{false};

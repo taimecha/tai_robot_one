@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <memory>
 #include <fstream>
+#include <tuple>
 #include <nlohmann/json.hpp>
 #include <gtest/gtest.h>
 #include <behaviortree_cpp/bt_factory.h>
@@ -257,6 +258,49 @@ TEST_F(FootprintBTTest, SlightlyFutureFootprintStampDoesNotCancelClearRoute)
   EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
 }
 
+TEST_F(FootprintBTTest, TerminalPivotCanLeaveOnlyExistingGlobalPaddingContact)
+{
+  auto path = board->get<nav_msgs::msg::Path>("path");
+  path.poses.back().pose.position.x = .04;
+  path.poses.back().pose.orientation.z = std::sin(-.5 / 2);
+  path.poses.back().pose.orientation.w = std::cos(-.5 / 2);
+  board->set("path", path);
+  split_frames = true;
+  local_map = map;
+  local_map.header.frame_id = "odom";
+  map.data[85 * 160 + 112] = 254;  // Raster fork edge, outside the original core.
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear path='{path}' prepared='true'/></BehaviorTree></root>", board);
+  connect();
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  auto goal = path.poses.back();
+  goal.header.frame_id = "map";
+  board->set("goal", goal);
+  auto direct_tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='direct' goal='{goal}' checked_path='{direct_path}'/>"
+    "</BehaviorTree></root>", board);
+  EXPECT_EQ(direct_tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  // A newly encountered global cell during the turn remains blocking.
+  map.data[66 * 160 + 110] = 254;
+  publish();
+  rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+  map.data[66 * 160 + 110] = 0;
+  // Live contact must not be treated as a map-only padding discrepancy.
+  local_map.data[85 * 160 + 112] = 254;
+  publish();
+  rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+  local_map.data[85 * 160 + 112] = 0;
+  // Even an existing global contact inside the core remains blocking.
+  map.data[80 * 160 + 109] = 254;
+  publish();
+  rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+}
+
 TEST_F(FootprintBTTest, SafeTerminalPivotDoesNotForceLongerAlignedRoute)
 {
   auto path = board->get<nav_msgs::msg::Path>("path");
@@ -283,6 +327,34 @@ TEST_F(FootprintBTTest, RejectsRouteThatCanAlignOnlyAtExactGoalCell)
   map.data[91 * 160 + 106] = 254;  // x=.6625, y=.2875
   connect();
   EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+}
+
+TEST_F(FootprintBTTest, DirectRouteCanApproachExactGoalBeforeFinalPivot)
+{
+  geometry_msgs::msg::PoseStamped goal;
+  goal.header.frame_id = "map";
+  goal.pose.position.x = .9;
+  goal.pose.orientation.z = std::sin(1.2 / 2);
+  goal.pose.orientation.w = std::cos(1.2 / 2);
+  board->set("goal", goal);
+  // Rotation first intersects this cell at the 5 cm XY boundary. The
+  // straight final centimetres and the yaw sweep at the exact goal are clear.
+  map.data[104 * 160 + 114] = 254;  // x=.8625, y=.6125
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='direct' goal='{goal}' checked_path='{path}'/>"
+    "</BehaviorTree></root>", board);
+  connect();
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  const auto path = board->get<nav_msgs::msg::Path>("path");
+  robot_transform.translation.x = .86;
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear path='{path}' planner_id='Direct' prepared='true'/>"
+    "</BehaviorTree></root>", board);
+  publish();
+  rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
 }
 
 TEST_F(FootprintBTTest, RejectsTerminalTurnSensitiveToTrackingOffset)
@@ -838,6 +910,13 @@ TEST_F(FootprintBTTest, TwoLocalAdjustmentsSurviveReplansAndPreferContinuousRetr
   }
   EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE)
     << "Another tiny turn in the same pocket must not interrupt retreat";
+  auto recovery = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='recovery_allowed' goal='{goal}' "
+    "planner_error='208' controller_error='0' local_blocked='false'/>"
+    "</BehaviorTree></root>", board);
+  EXPECT_EQ(recovery.tickOnce(), BT::NodeStatus::SUCCESS)
+    << "Local adjustment history must survive an overwritten planner blockage flag";
   auto forward = factory.createTreeFromText(
     "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
     "<PathFootprintClear motion='forward' goal='{goal}'/>"
@@ -853,6 +932,7 @@ TEST_F(FootprintBTTest, TwoLocalAdjustmentsSurviveReplansAndPreferContinuousRetr
   EXPECT_EQ(RunningBackup::starts, 1);
   EXPECT_EQ(RunningBackup::stops, 0);
   robot_transform.translation.x = -.31;
+  rclcpp::sleep_for(std::chrono::milliseconds(220));
   publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
   EXPECT_EQ(backup.tickOnce(), BT::NodeStatus::FAILURE);
   EXPECT_EQ(RunningBackup::stops, 1);
@@ -1090,6 +1170,54 @@ TEST_F(FootprintBTTest, WideCornerUsesQuarterCircleWhenFootprintFits)
   EXPECT_DOUBLE_EQ(path.poses.back().pose.position.y, 1.0);
 }
 
+TEST_F(FootprintBTTest, ClearLatticeStopTurnBecomesContinuousCheckedCorner)
+{
+  nav_msgs::msg::Path path;
+  path.header.frame_id = "map";
+  for (const auto & p : std::vector<std::tuple<double, double, double>>{
+      {0.0, 0.0, 0.0}, {.2, 0.0, 0.0}, {.4, 0.0, 0.0},
+      {.4, 0.0, .35}, {.59, .069, .35}, {.78, .139, .35}, {.95, .20, .35}})
+  {
+    geometry_msgs::msg::PoseStamped point;
+    point.header.frame_id = "map";
+    point.pose.position.x = std::get<0>(p);
+    point.pose.position.y = std::get<1>(p);
+    const double yaw = std::get<2>(p);
+    point.pose.orientation.z = std::sin(yaw / 2);
+    point.pose.orientation.w = std::cos(yaw / 2);
+    path.poses.push_back(point);
+  }
+  board->set("path", path);
+  geometry_msgs::msg::PoseStamped goal = path.poses.back();
+  board->set("goal", goal);
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear path='{path}' goal='{goal}' planner_id='SE2Fallback' "
+    "checked_path='{rounded}'/>"
+    "</BehaviorTree></root>", board);
+  connect();
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  const auto rounded = board->get<nav_msgs::msg::Path>("rounded");
+  ASSERT_GT(rounded.poses.size(), path.poses.size());
+  for (size_t i = 1; i < rounded.poses.size(); ++i) {
+    const auto & a = rounded.poses[i - 1].pose;
+    const auto & b = rounded.poses[i].pose;
+    const double d = std::hypot(b.position.x - a.position.x,
+      b.position.y - a.position.y);
+    const double turn = std::abs(std::remainder(
+      tf2::getYaw(b.orientation) - tf2::getYaw(a.orientation), 6.283185307179586));
+    EXPECT_FALSE(d < .005 && turn > .02);
+  }
+  // This cell lies in the moving fillet's rear sweep while the original
+  // stopped turn remains clear. Keep the original maneuver in that case.
+  map.data[67 * 160 + 81] = 254;
+  publish();
+  rclcpp::sleep_for(std::chrono::milliseconds(40));
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  const auto fallback = board->get<nav_msgs::msg::Path>("rounded");
+  EXPECT_EQ(fallback.poses.size(), path.poses.size());
+}
+
 TEST_F(FootprintBTTest, NewGoalClearsOldRecoveryErrorState)
 {
   selectMotion("recovery_allowed");
@@ -1218,6 +1346,19 @@ TEST_F(FootprintBTTest, ReplayStationaryRobotCapture)
       pose.pose.orientation.w = p["pose"]["orientation"]["w"];
       path.poses.push_back(pose);
     }
+  }
+  if (data.contains("selected")) {
+    for (const auto & p : data["selected"]["poses"]) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.pose.position.x = p["pose"]["position"]["x"];
+      pose.pose.position.y = p["pose"]["position"]["y"];
+      pose.pose.orientation.z = p["pose"]["orientation"]["z"];
+      pose.pose.orientation.w = p["pose"]["orientation"]["w"];
+      path.poses.push_back(pose);
+    }
+    tree = factory.createTreeFromText(
+      "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+      "<PathFootprintClear path='{path}' prepared='true'/></BehaviorTree></root>", board);
   }
   if (std::getenv("TAI_CLEARANCE_MOTION")) {
     selectMotion(std::getenv("TAI_CLEARANCE_MOTION"));
@@ -1861,17 +2002,18 @@ TEST_F(ForwardSearchBTTest, LongCurrentPoseDetourIsComparedWithForwardDepartures
     "path='{candidate}' planner='{candidate_planner}'/>"
     "<CheckRankedRoute path='{selected}'/><ExecuteRankedRoute path='{selected}'/>"
     "</RankedRouteSearch></BehaviorTree></root>", board);
-  for (int i = 0; i < 39; ++i) {
+  // The GitHub baseline searches six current routes and 24 forward starts.
+  // Aligned goal entries are reserved for the case with no current route.
+  for (int i = 0; i < 30; ++i) {
     EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::RUNNING);
     EXPECT_TRUE(ExecuteRankedRoute::executed.empty());
   }
   EXPECT_EQ(complete(), BT::NodeStatus::SUCCESS);
-  ASSERT_EQ(SyntheticForwardProposal::distances.size(), 39u);
+  ASSERT_EQ(SyntheticForwardProposal::distances.size(), 30u);
   EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[0], 0.0);
   EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[6], .15);
   EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[29], 1.20);
-  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[30], .25);
-  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances.back(), .75);
+  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances.back(), 1.20);
   ASSERT_EQ(ExecuteRankedRoute::executed.size(), 1u);
   EXPECT_DOUBLE_EQ(ExecuteRankedRoute::executed[0], 1.0);
 }
@@ -1926,7 +2068,7 @@ TEST_F(ForwardSearchBTTest, ShortCurrentPoseRoutesDoNotTriggerExtraDepartureSear
   EXPECT_EQ(SyntheticForwardProposal::distances.size(), 6u);
 }
 
-TEST_F(ForwardSearchBTTest, LargeTerminalPivotComparesAlignedApproachesWithoutForwardDetours)
+TEST_F(ForwardSearchBTTest, ClearRouteWithLargeTerminalPivotDoesNotAddApproachDetours)
 {
   SyntheticForwardProposal::goal_yaw = 1.2;
   tree = factory.createTreeFromText(
@@ -1941,9 +2083,9 @@ TEST_F(ForwardSearchBTTest, LargeTerminalPivotComparesAlignedApproachesWithoutFo
     "<CheckRankedRoute path='{selected}'/><ExecuteRankedRoute path='{selected}'/>"
     "</RankedRouteSearch></BehaviorTree></root>", board);
   EXPECT_EQ(complete(), BT::NodeStatus::SUCCESS);
-  ASSERT_EQ(SyntheticForwardProposal::distances.size(), 15u);
-  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances[6], .25);
-  EXPECT_DOUBLE_EQ(SyntheticForwardProposal::distances.back(), .75);
+  ASSERT_EQ(SyntheticForwardProposal::distances.size(), 6u);
+  for (const double d : SyntheticForwardProposal::distances) {EXPECT_DOUBLE_EQ(d, 0.0);}
+  ASSERT_EQ(ExecuteRankedRoute::executed.size(), 1u);
 }
 
 TEST_F(ForwardSearchBTTest, BlockedDirectLineDoesNotAddAlignedApproachDetour)
@@ -2342,7 +2484,7 @@ public:
   BT::NodeStatus tick() override {++starts; return BT::NodeStatus::SUCCESS;}
 };
 
-TEST_F(FootprintBTTest, RealRetreatSubtreeHaltsBackupAndExecutesPartialTurnBeforeReturning)
+TEST_F(FootprintBTTest, RealRetreatSubtreeHaltsBackupOnlyWhenFullExitFits)
 {
   for (const auto & lib : {
     "compute_path_to_pose_action", "follow_path_action", "wait_action",
@@ -2383,16 +2525,24 @@ TEST_F(FootprintBTTest, RealRetreatSubtreeHaltsBackupAndExecutesPartialTurnBefor
   for (int i = 0; i < 10; ++i) {EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::RUNNING);}
   EXPECT_EQ(RunningBackup::starts, 1);
   EXPECT_EQ(CheckedMockSpin::starts, 0);
-  // New observations expose a safe angled pocket, but still block the full
-  // goal-facing sweep. BackUp must halt and Spin must run in this same call.
+  // A small angled pocket still blocks the full goal-facing turn: retain
+  // the SAME BackUp action instead of returning to repeated partial spins.
   map.data.assign(map.data.size(), 0);
   map.data[109 * 160 + 89] = 254;
+  rclcpp::sleep_for(std::chrono::milliseconds(220));
+  publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::RUNNING);
+  EXPECT_EQ(RunningBackup::starts, 1);
+  EXPECT_EQ(RunningBackup::stops, 0);
+  EXPECT_EQ(CheckedMockSpin::starts, 0);
+  // Only a completely clear sweep and departure corridor allows handoff.
+  map.data[109 * 160 + 89] = 0;
   rclcpp::sleep_for(std::chrono::milliseconds(220));
   publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
   EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
   EXPECT_EQ(RunningBackup::stops, 1);
   EXPECT_EQ(CheckedMockSpin::starts, 1);
-  EXPECT_LT(std::abs(board->get<double>("escape_turn_angle")), 1.4);
+  EXPECT_NEAR(board->get<double>("escape_turn_angle"), M_PI / 2, 1e-5);
   EXPECT_TRUE(board->get<nav_msgs::msg::Path>("path").poses.empty());
 }
 
@@ -2421,4 +2571,220 @@ TEST_F(FootprintBTTest, RealEscapeTreeLoadsWithInstalledNav2PortContracts)
   }
   board->set("goal", geometry_msgs::msg::PoseStamped{});
   EXPECT_NO_THROW(factory.createTreeFromFile(REAL_ESCAPE_TREE, board));
+}
+
+TEST_F(FootprintBTTest, NoValidPathAllowsLocalRecoveryOnlyWithGeometricEvidence)
+{
+  selectMotion("recovery_allowed");
+  board->set<uint16_t>("planner", 208);
+  connect();
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+  board->set("blocked", true);
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  for (const uint16_t fault : {200, 202, 203, 204, 206, 207}) {
+    board->set<uint16_t>("planner", fault);
+    EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+  }
+  board->set<uint16_t>("planner", 208);
+  board->set<uint16_t>("controller", 107);
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+}
+
+TEST_F(FootprintBTTest, RetreatStaysContinuousAcrossRepeatedThirtyCentimeterIntervals)
+{
+  // This aisle permits 15-degree adjustments, but the complete exit turn
+  // only fits in the open space behind x=-1.0. Distance alone cannot release
+  // retreat commitment and re-enable those ineffective partial turns.
+  map.metadata.size_x = 240;
+  map.metadata.origin.position.x = -3.0;
+  map.data.assign(240 * 160, 0);
+  for (unsigned int ix = 80; ix < 240; ++ix) {
+    map.data[54 * 240 + ix] = 254;
+    map.data[105 * 240 + ix] = 254;
+  }
+  selectMotion("turn");
+  auto goal = board->get<geometry_msgs::msg::PoseStamped>("goal");
+  goal.pose.position.x = -1.8;
+  goal.pose.position.y = 1.0;
+  board->set("goal", goal);
+  connect();
+  auto begin = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='turn_begin' goal='{goal}' candidate_angle='{angle}'/>"
+    "</BehaviorTree></root>", board);
+  auto reset = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<ResetEscapeState invalidate_path='true' turn_completed='true'/>"
+    "</BehaviorTree></root>", board);
+  for (int i = 0; i < 2; ++i) {
+    ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+    ASSERT_LT(std::abs(board->get<double>("angle")), 0.7);
+    ASSERT_EQ(begin.tickOnce(), BT::NodeStatus::SUCCESS);
+    ASSERT_EQ(reset.tickOnce(), BT::NodeStatus::SUCCESS);
+  }
+  factory.registerNodeType<RunningBackup>("RunningBackup");
+  RunningBackup::starts = RunningBackup::stops = 0;
+  auto backup = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'><Fallback>"
+    "<ReactiveSequence><PathFootprintClear motion='reverse_needed' goal='{goal}'/>"
+    "<RunningBackup/></ReactiveSequence>"
+    "<PathFootprintClear motion='escape_available' goal='{goal}'/>"
+    "</Fallback></BehaviorTree></root>", board);
+  for (double rear_travel : {0.0, .31, .62, .93, 1.24}) {
+    robot_transform.translation.x = -rear_travel;
+    rclcpp::sleep_for(std::chrono::milliseconds(220));
+    publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
+    ASSERT_EQ(backup.tickOnce(), BT::NodeStatus::RUNNING)
+      << "Still in the aisle after " << rear_travel << " m; keep the same BackUp active";
+    EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+    EXPECT_EQ(RunningBackup::starts, 1);
+    EXPECT_EQ(RunningBackup::stops, 0);
+  }
+  robot_transform.translation.x = -1.90;
+  rclcpp::sleep_for(std::chrono::milliseconds(220));
+  publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
+  ASSERT_EQ(backup.tickOnce(), BT::NodeStatus::SUCCESS);
+  EXPECT_EQ(RunningBackup::starts, 1);
+  EXPECT_EQ(RunningBackup::stops, 1);
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  EXPECT_NEAR(board->get<double>("angle"), std::atan2(1.0, .10), 1e-5);
+}
+
+TEST_F(FootprintBTTest, CommittedRetreatRequiresLongerExitAndRechecksBeforeTurn)
+{
+  selectMotion("turn");
+  auto goal = board->get<geometry_msgs::msg::PoseStamped>("goal");
+  goal.pose.position.x = 0;
+  goal.pose.position.y = 1.5;
+  board->set("goal", goal);
+  // Outside the rotation and former 30 cm departure check, but inside
+  // the longer departure corridor. A small open pocket is not an exit.
+  map.data[134 * 160 + 80] = 254;
+  connect();
+  auto collision = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='turn_collision' goal='{goal}' motion_error='703'/>"
+    "</BehaviorTree></root>", board);
+  ASSERT_EQ(collision.tickOnce(), BT::NodeStatus::SUCCESS);
+  auto reverse = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='reverse_needed' goal='{goal}'/>"
+    "</BehaviorTree></root>", board);
+  ASSERT_EQ(reverse.tickOnce(), BT::NodeStatus::SUCCESS);
+  robot_transform.translation.x = -.20;
+  rclcpp::sleep_for(std::chrono::milliseconds(220));
+  publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+  ASSERT_EQ(reverse.tickOnce(), BT::NodeStatus::SUCCESS);
+  board->set("angle", std::atan2(1.5, .20));
+  auto begin = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='turn_begin' goal='{goal}' candidate_angle='{angle}'/>"
+    "</BehaviorTree></root>", board);
+  EXPECT_EQ(begin.tickOnce(), BT::NodeStatus::FAILURE);
+  map.data[134 * 160 + 80] = 0;
+  rclcpp::sleep_for(std::chrono::milliseconds(220));
+  publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(reverse.tickOnce(), BT::NodeStatus::FAILURE);
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  EXPECT_EQ(begin.tickOnce(), BT::NodeStatus::SUCCESS);
+}
+
+TEST_F(FootprintBTTest, AlignedRearGoalWithinOneMeterUsesCheckedBackwardRoute)
+{
+  selectMotion("direct");
+  auto goal = board->get<geometry_msgs::msg::PoseStamped>("goal");
+  goal.pose.position.x = -1.0;
+  board->set("goal", goal);
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='direct' goal='{goal}' checked_path='{path}' path_planner='{chosen}'/>"
+    "</BehaviorTree></root>", board);
+  connect();
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  EXPECT_EQ(board->get<std::string>("chosen"), "DirectReverse");
+  const auto path = board->get<nav_msgs::msg::Path>("path");
+  ASSERT_GT(path.poses.size(), 30u);
+  for (const auto & point : path.poses) {EXPECT_NEAR(tf2::getYaw(point.pose.orientation), 0, 1e-8);}
+  EXPECT_DOUBLE_EQ(path.poses.back().pose.position.x, -1.0);
+  robot_transform.translation.x = -.96;
+  publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
+  auto prepared = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear path='{path}' goal='{goal}' planner_id='DirectReverse' prepared='true'/>"
+    "</BehaviorTree></root>", board);
+  EXPECT_EQ(prepared.tickOnce(), BT::NodeStatus::SUCCESS);
+  // A live obstacle along the full rear corridor rejects the candidate.
+  robot_transform.translation.x = 0;
+  map.data[80 * 160 + 60] = 254;
+  publish(); rclcpp::sleep_for(std::chrono::milliseconds(40));
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE);
+}
+
+TEST_F(FootprintBTTest, ReverseGoalSelectionRejectsLongSidewaysAndChangedHeadingGoals)
+{
+  selectMotion("direct");
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='direct' goal='{goal}' checked_path='{path}' path_planner='{chosen}'/>"
+    "</BehaviorTree></root>", board);
+  connect();
+  for (const auto & p : std::vector<std::vector<double>>{{-1.02,0,0},{0,-.5,0},{-.5,0,.2}}) {
+    auto goal = board->get<geometry_msgs::msg::PoseStamped>("goal");
+    goal.pose.position.x = p[0]; goal.pose.position.y = p[1];
+    goal.pose.orientation.z = std::sin(p[2]/2); goal.pose.orientation.w = std::cos(p[2]/2);
+    board->set("goal", goal);
+    (void)tree.tickOnce();
+    EXPECT_EQ(board->get<std::string>("chosen"), "Direct");
+  }
+}
+
+TEST_F(FootprintBTTest, ForwardEscapeRequiresWholeGoalFacingTurnAtItsDestination)
+{
+  map.metadata.size_x = 240;
+  map.metadata.origin.position.x = -3.0;
+  map.data.assign(240 * 160, 0);
+  for (unsigned int ix = 80; ix < 240; ++ix) {
+    map.data[54 * 240 + ix] = 254;
+    map.data[105 * 240 + ix] = 254;
+  }
+  selectMotion("forward");
+  auto goal = board->get<geometry_msgs::msg::PoseStamped>("goal");
+  goal.pose.position.x = -1.8; goal.pose.position.y = 1.0;
+  board->set("goal", goal);
+  connect();
+  EXPECT_EQ(tree.tickOnce(), BT::NodeStatus::FAILURE)
+    << "A small angled opening in the aisle must not authorize advance into another dead end";
+  auto begin = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='forward_begin' goal='{goal}' candidate_distance='0.30'/>"
+    "</BehaviorTree></root>", board);
+  EXPECT_EQ(begin.tickOnce(), BT::NodeStatus::FAILURE);
+}
+
+TEST_F(FootprintBTTest, OffsetRearGoalUsesContinuousCurveWithUnchangedFinalHeading)
+{
+  selectMotion("direct");
+  auto goal = board->get<geometry_msgs::msg::PoseStamped>("goal");
+  goal.pose.position.x = -.7; goal.pose.position.y = .2;
+  board->set("goal", goal);
+  tree = factory.createTreeFromText(
+    "<root BTCPP_format='4'><BehaviorTree ID='Main'>"
+    "<PathFootprintClear motion='direct' goal='{goal}' checked_path='{path}' path_planner='{chosen}'/>"
+    "</BehaviorTree></root>", board);
+  connect();
+  ASSERT_EQ(tree.tickOnce(), BT::NodeStatus::SUCCESS);
+  EXPECT_EQ(board->get<std::string>("chosen"), "DirectReverse");
+  const auto path = board->get<nav_msgs::msg::Path>("path");
+  ASSERT_GE(path.poses.size(), 80u);
+  EXPECT_NEAR(tf2::getYaw(path.poses.front().pose.orientation), 0, 1e-8);
+  EXPECT_NEAR(tf2::getYaw(path.poses.back().pose.orientation), 0, 1e-8);
+  EXPECT_DOUBLE_EQ(path.poses.back().pose.position.x, -.7);
+  EXPECT_DOUBLE_EQ(path.poses.back().pose.position.y, .2);
+  for (size_t i=1; i<path.poses.size(); ++i) {
+    const auto & a=path.poses[i-1].pose; const auto & b=path.poses[i].pose;
+    const double heading=tf2::getYaw(a.orientation);
+    EXPECT_LT((b.position.x-a.position.x)*std::cos(heading)+
+      (b.position.y-a.position.y)*std::sin(heading),0);
+  }
 }

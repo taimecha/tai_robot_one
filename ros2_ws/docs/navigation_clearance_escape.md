@@ -1,3 +1,140 @@
+## Local fork-tip raster contact during retreat, 2026-10-02
+
+After several successful live goals, navigation to `(3.561430, 0.114829,
+1.557230)` aborted from `(0.106, -0.470)` facing about 39.7 degrees. Route
+checks reported blocked initial turns; the controller reported no clear local
+tracking arc; Smac Lattice later reported `Start occupied`. The checked
+16 cm retreat stopped. A read-only post-goal costmap/TF capture reproduced
+the retreat rejection in isolated ROS domain 231. Exact C++ collision
+diagnostics placed its first blocked sample 1 cm rearward: global footprint
+cost 253, local cost 254. Live `/scan_filtered` points at `(0.639, 0.165)` in map,
+within about 1.3 cm of the local lethal cell and about 1.9 cm outside the
+padded fork edge at the stopped pose. The laser return is real; the extra
+raster cell contact during translation occurs at the front while reversing
+away from it. The capture was taken after the abort and cannot reproduce
+every earlier moving costmap update.
+
+The local costmap padding is now 25 mm instead of 30 mm; the configured
+polygon already includes 20 mm, leaving 45 mm total planning margin around
+the measured physical outline. Global costmap padding stays 30 mm. Isolated
+replay of the stopped capture passes the complete 16 cm rear guard with only
+5 mm reduction; inserting a lethal local rear cell makes the same replay
+reject retreat. The live filtered scan had no returns inside the revised
+padded footprint at the stopped pose. Nav2 BackUp, live local observations,
+full-body route validation and Collision Monitor's FootprintApproach still
+check their own corridors. Physical
+execution of the new margin requires a Nav2 restart and a new operator goal.
+
+## Terminal pivot from an existing padding contact, 2026-10-02
+
+The latest live goal `(2.364308, -0.354141, -2.915173)` selected a 2.056 m
+SE2Arc route. After about eight seconds the route guard canceled FollowPath;
+subsequent searches failed and navigation aborted. The stopped robot was
+4.223 cm from the requested XY, with 32.44 degrees of heading error. The
+post-goal read-only capture found one lethal global raster edge cell
+`(1.909, -1.018)` in the padded fork footprint, no core-body contact and no
+live local footprint contact. A clockwise correction released that initial
+contact immediately and ended clear. This capture reproduces the stopped
+geometry, rather than every moving costmap update before cancellation.
+
+Terminal validation now permits a shortest pivot out of an existing contact
+confined to the extra 3 cm global padding. Only initially intersected lethal
+padding cells are excluded in a private validation copy. The original core
+and live full footprint are checked over the entire turn; all new obstacles
+and unknown cells remain blocking. The full footprint must end clear on the
+original maps, and returning to a contact after leaving it is rejected.
+This applies only at an accepted terminal XY on a prepared path or a nearby
+Direct proposal, so retrying the same goal can reach final alignment too.
+No published costmap, physical footprint or acceptance tolerance is changed.
+
+The captured selected path failed the isolated replay before this fix.
+Synthetic coverage includes release from a map-only fork-padding contact,
+retrying a Direct goal, and rejection of live, core or newly encountered
+contacts. No real robot action or velocity command was sent for verification.
+After the fix, the captured prepared path and same-goal Direct proposal both
+passed replay, and the complete `test_path_footprint_bt` CTest group passed.
+The rebuilt BT library was installed atomically; the running Nav2 process
+keeps its previous mapped library until the user restarts navigation.
+
+## Nearby rear goals and stronger advance pockets, 2026-10-02
+
+The failed live goal `(3.125522, -0.077951, 1.563481)` started near
+`(-0.446, 1.517)`. Recovery advanced 30 cm to a pocket that admitted a
+15-degree turn and a short departure. Native Spin then reported collision.
+The robot retreated about 53 cm, the rear-footprint guard stopped BackUp,
+subsequent route searches failed, and the goal aborted. A read-only capture
+at the stopped pose reproduced the rear rejection; the global costmap had
+lethal edge cells in the padded rear footprint 16 cm farther back. The capture
+was taken after the goal, so it is not a replay of the earlier moving scene.
+
+Forward recovery now requires the whole goal-facing turn at its proposed
+endpoint, both before starting and during advance. All local turn exits
+require a checked departure up to 75 cm rather than the former 30 cm.
+The rear guard reports the blocked rear corridor explicitly. Obstacles remain
+blocking. BackUp cancellation result waiting is 200 ms (was 20 ms); normal
+server acknowledgment waiting is 100 ms. The previous wait expired before
+the 20 Hz behavior loop had returned its cancellation result.
+
+The existing Direct proposal also offers `DirectReverse` when the requested
+goal is within 1 m, its signed longitudinal displacement is behind the robot
+by more than 5 cm, and goal heading differs by at most 5 degrees. Goals near
+the rear axis get a straight rear route. Offset rear goals get a cubic curve
+whose endpoint tangents preserve start and goal chassis headings. Full body
+poses, the final correction and fresh local/global costmaps are checked.
+Only consistently rearward paths within 1 m endpoint displacement and 1.5 m
+route length enable reverse tracking; ambiguous or obstructed curves fail
+validation. FollowPath drives these routes at no more than 0.08 m/s, checks
+native time-to-collision with the negative velocity, and brakes before a gear
+change. Arrival tolerances stay 5 cm and 5 degrees.
+
+All four selected CTest groups passed, including the actual controller with
+synthetic TF/costmaps: straight reverse without a half-turn, curved reverse
+steering, arrival stop, forward/reverse braking and rear collision rejection.
+Additional route tests cover a 1 m rear destination, lateral rear curves,
+changed-heading/long/sideways rejection, full-corridor obstacles, and refusing
+forward advance when only a small angled pocket fits. These are isolated
+regressions; no real goal or velocity command was sent for this revision.
+
+## Pi reset from GitHub, 2026-10-02
+
+Base: GitHub `taimecha/tai_robot_one`, commit `40b48f7d140ed1c294f45e085cb5f07cf3eac0b0`.
+The previous local workspace was moved to
+`/home/admin/tai_robot_one/tai_robot_one_before_reset_20261002_125616` before
+cloning the baseline into `/home/admin/tai_robot_one/tai_robot_one`.
+
+This revision adds continuous retreat and adjusts speeds. Starting BackUp
+commits immediately; crossing any rear-distance threshold does not release
+that commitment. The same BackUp action stays active until the full checked
+exit turn and a corridor up to 75 cm toward the goal fit at the current pose.
+The turn has the existing extra footprint/braking margins. The subtree stops
+BackUp, waits for braking, rechecks the whole turn and corridor, and then
+executes Spin. Rear obstruction and stale sensor/TF data still stop recovery.
+A NO_VALID_PATH result permits this local recovery only with local blockage
+or an existing recovery/turn-limit state; a distant unreachable goal alone
+does not authorize reverse motion.
+
+Cruise translation is 0.28 m/s (was 0.20), heading alignment and recovery Spin
+are capped at 0.35 rad/s (was 0.30). Final yaw correction is capped at
+0.24 rad/s with a 0.22 rad/s active floor. Arrival speed taper starts within
+0.30 m of remaining path (was 0.90 m), with a 0.10 m/s minimum approach speed.
+Obstacle, curvature, collision and acceleration limits still regulate speed
+when needed. Checked recovery BackUp retains its 0.08 m/s speed.
+Final goal acceptance is 0.05 m and 0.0872664626 rad (5 cm and 5 degrees),
+shared by the goal checker, controller and route footprint validation.
+
+Regression coverage includes one active BackUp across 0.31, 0.62, 0.93 and
+1.24 m, rejecting a pocket with less than the longer exit corridor, rechecking
+that corridor before Spin, and the actual retreat subtree's handoff from
+BackUp to Spin. These are isolated tests, not real robot motion results.
+
+Fresh builds of `tai_robot_one`, `sllidar_ros2`, `astra_camera_msgs` and
+`astra_camera` completed. All three selected CTest groups passed:
+`test_stop_envelope`, `test_rotation_sweep`, and `test_path_footprint_bt`.
+The optional capture replay was skipped without a supplied capture file.
+The Nav2 launch argument check passed using only this newly installed workspace.
+Two old route-search test expectations were aligned with the GitHub baseline's
+existing policy; no route planner or route-ranking code was changed.
+
 # Real navigation: footprint clearance and continuous escape
 
 `nav_real.launch.py`, `nav_sim.launch.py` and `slam_nav_sim.launch.py` select
@@ -566,3 +703,45 @@ Only in the isolated headless replays, the collision monitor's camera scan
 source was disabled at runtime because intermittent stale scan messages
 stopped the simulation. The camera still fed the costmaps. The checked-in
 camera collision-monitor configuration stays enabled for normal launch.
+
+## Straight route with a late terminal pivot, 2026-10-02
+
+The latest live goal started near (3.501, 0.513) at 90 degrees and ended near
+(1.446, -0.379) at -170.7 degrees. Its straight XY bearing was -156.5 degrees.
+The Direct candidate was rejected at its first accepted 5 cm XY point because
+the final yaw sweep was blocked there, so the route search chose a longer
+SE2Fallback curve. That check did not try the remaining few centimetres of
+straight travel before pivoting at the exact endpoint.
+
+For a Direct candidate, validation now checks the full-footprint straight
+segment from the first accepted XY point to the endpoint and the complete yaw
+sweep at that endpoint. The prepared-route check and FollowPath controller
+allow that final translation when the current pivot is blocked and the
+endpoint is ahead. The controller still checks its local costmap and stops if
+the short segment becomes occupied. Synthetic tests cover acceptance of this
+case, rejection of the same shape for a generic path, and straight motion
+before the final turn. The two affected CTest groups pass. The available
+costmap capture was taken after the goal, so it does not prove the original
+start turn or straight corridor was clear at execution time. A live retry
+after restarting Nav2 is needed to confirm that route on the robot.
+
+## Rounded lattice corners, 2026-10-02
+
+The next live goal from (3.708, 1.149) to (0.130, -0.569) selected a 4.205 m
+SE2Fallback route. Its chosen path included a large initial turn and several
+intermediate stop-turn-go corners of roughly 18-25 degrees. The Direct route
+was blocked near (2.448, 0.544), so the screen's empty-looking center did not
+establish that a straight body path was clear at planning time.
+
+For current-pose SE2Fallback routes, the validator now tries a tangent circular
+fillet at each small intermediate stationary corner. Radii of 0.40 or 0.30 m
+are considered only when both neighboring straight segments fit the trim.
+Every new arc and its joins are checked with the same global and nearby local
+costmaps and padded body footprint used for the original route. A blocked or
+too-tight corner keeps its original stop-turn-go primitive; the large initial
+turn and last 30 cm near a goal are left alone. The selected route publishes
+the actual modified path to `/plan_selected`, and the existing fresh-route
+check validates it again during motion. Synthetic tests verified a continuous
+clear corner and fallback when a cell blocks only the moving fillet. The three
+relevant CTest groups passed. This is a local code change; the old live Nav2
+process must be restarted before a robot trial can establish its effect.

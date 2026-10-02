@@ -18,7 +18,10 @@ TEST(EscapeMemory, SmallAdjustmentsInSameRegionCommitRetreat)
   memory.beginReverse(.15, 0, 0);
   EXPECT_FALSE(memory.observe(.05, 0));
   EXPECT_FALSE(memory.observe(.15, .40));  // sideways distance is not retreat
-  EXPECT_TRUE(memory.observe(-.16, 0));
+  EXPECT_FALSE(memory.observe(-.16, 0));
+  EXPECT_FALSE(memory.observe(-1.50, 0));
+  EXPECT_TRUE(memory.committed);
+  memory.reset();  // a checked exit or new goal explicitly releases retreat
   EXPECT_FALSE(memory.committed);
   EXPECT_EQ(memory.attempts, 0u);
 }
@@ -31,7 +34,12 @@ TEST(EscapeMemory, CollisionCommitIsIdempotentAndUsesActualReverseHeading)
   memory.commit();
   memory.beginReverse(1, .90, 0);  // repeated guard must not reset the anchor
   EXPECT_FALSE(memory.observe(1, .80));
-  EXPECT_TRUE(memory.observe(1, .69));
+  EXPECT_FALSE(memory.observe(1, .69));
+  EXPECT_FALSE(memory.observe(1, -1));
+  EXPECT_TRUE(memory.committed);
+  EXPECT_DOUBLE_EQ(memory.reverse_x, 1);
+  EXPECT_DOUBLE_EQ(memory.reverse_y, 1);
+  EXPECT_DOUBLE_EQ(memory.reverse_yaw, tai_robot_one::kPi / 2);
 }
 
 TEST(EscapeMemory, SignificantNewRegionAndNewGoalResetLocalAttempts)

@@ -7,7 +7,8 @@ namespace tai_robot_one
 {
 // Local recovery is not a complete route. Two small adjustments in the same
 // odometry region are enough speculation before seeking different space.
-// Yaw changes, AMCL corrections and ordinary replans cannot erase this state.
+// Rear travel, yaw changes, AMCL corrections and replans cannot release a
+// committed retreat. A checked exit or a new goal releases it explicitly.
 struct EscapeMemory
 {
   bool region_active{false}, committed{false}, reversing{false};
@@ -17,12 +18,7 @@ struct EscapeMemory
   void reset() {*this = EscapeMemory{};}
   bool observe(double x, double y)
   {
-    if (committed) {
-      const double dx = x - reverse_x, dy = y - reverse_y;
-      if (reversing && -dx * std::cos(reverse_yaw) - dy * std::sin(reverse_yaw) >= 0.30 &&
-        std::hypot(dx, dy) >= 0.25)
-      {reset(); return true;}
-    } else if (region_active && std::hypot(x - region_x, y - region_y) > 0.45) {
+    if (!committed && region_active && std::hypot(x - region_x, y - region_y) > 0.45) {
       reset(); return true;
     }
     return false;

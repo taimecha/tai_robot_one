@@ -17,6 +17,26 @@ struct TrackingTarget
   bool at_turn{false};
 };
 
+// A bounded rear goal is a normal route. Heading describes the chassis,
+// while every translated segment moves opposite that heading.
+inline bool shortReversePath(const std::vector<TrackingPose> & path)
+{
+  if (path.size() < 2) {return false;}
+  double length = 0.0;
+  for (size_t i = 1; i < path.size(); ++i) {
+    const auto & a = path[i - 1]; const auto & b = path[i];
+    if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.yaw) ||
+      !std::isfinite(b.x) || !std::isfinite(b.y) || !std::isfinite(b.yaw)) {return false;}
+    const double dx = b.x - a.x, dy = b.y - a.y;
+    const double d = std::hypot(dx, dy);
+    if (d < 1e-6) {continue;}
+    if (std::abs(wrapAngle(std::atan2(dy, dx) - a.yaw - kPi)) > .12) {return false;}
+    length += d;
+  }
+  return length > .01 && length <= 1.5 &&
+         std::hypot(path.back().x - path.front().x, path.back().y - path.front().y) <= 1.0 + 1e-6;
+}
+
 inline bool canApproachGoalWithoutStationaryTurn(
   double x, double y, double remaining_length, double xy_tolerance)
 {
