@@ -20,7 +20,11 @@ def parse_args(role, argv=None):
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--conf', type=float, default=.60)
     parser.add_argument('--nms-iou', type=float, default=.30)
+    parser.add_argument('--target-color', choices=('any', 'green'), default='any',
+                        help='Target identity only; search the whole image at any position')
     parser.add_argument('--cpu-threads', type=int, default=2)
+    parser.add_argument('--ncnn-precision', choices=('auto','float32'), default='auto',
+                        help='Use native ARM FP16 arithmetic when supported; float32 is the fallback')
     parser.add_argument('--start-paused', action='store_true')
     parser.add_argument('--recognize-after-goal', action='store_true',
                         help='Pause YOLO; acquire once after the next newly started Nav2 goal succeeds')
@@ -31,6 +35,8 @@ def parse_args(role, argv=None):
     parser.add_argument('--pitch-deg', type=float, default=20.0)
     parser.add_argument('--heading-floor-reference', action='store_true',
                         help='Angle only: fit pallet front plane with a visible flat floor and zero camera roll')
+    parser.add_argument('--rgb-gap-recovery',action=argparse.BooleanOptionalAction,default=True,
+                        help='Reverify both RGB leg templates after a short input gap; never reuse a pose')
     parser.add_argument('--camera-ahead-of-chassis-m', type=float, default=.0665)
     parser.add_argument('--expected-opening-width-m', type=float, default=.252)
     parser.add_argument('--opening-width-tolerance-m', type=float, default=.08)

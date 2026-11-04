@@ -1,0 +1,17 @@
+# Fixed height calibration from 30 stationary frames of verified empty floor.
+# Fit 15 frames; validate the other 15 independently. Floor XY span 1.50 x 1.35 m.
+# Held-out 99th-percentile floor height: 0.94 cm; none above the unchanged 6-cm gate.
+# No depth X/Y, camera TF, obstacle height window or saved goals are changed.
+/spatial_depth_cloud:
+  ros__parameters:
+    pixel_stride: 3
+    max_rate_hz: 15.0
+    inverse_depth_x_slope: 7.019419557841291e-05
+    reference_u: 370.0
+    output_topic: /camera/depth/points_nav_corrected
+    floor_height_correction_enabled: true
+    height_reference_frame: base_footprint
+    floor_plane_coefficients:
+    - -0.05336965019614824
+    - -0.06520381933621708
+    - 0.028667883216461167

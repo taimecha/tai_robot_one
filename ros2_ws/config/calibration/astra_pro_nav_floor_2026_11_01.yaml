@@ -1,0 +1,17 @@
+# Stationary flat-floor fit, 35 registered depth frames, 2026-11-01.
+# Fixed during navigation; refit after changing camera mounting or depth calibration.
+# z_floor = a*x + b*y + c in base_footprint after inverse-depth correction.
+# Compensates obstacle HEIGHT only; planar X/Y and robot TF are preserved.
+/spatial_depth_cloud:
+  ros__parameters:
+    pixel_stride: 3
+    max_rate_hz: 15.0
+    inverse_depth_x_slope: 7.019419557841291e-05
+    reference_u: 370.0
+    output_topic: /camera/depth/points_nav_corrected
+    floor_height_correction_enabled: true
+    height_reference_frame: base_footprint
+    floor_plane_coefficients:
+    - -0.0631002163778395
+    - -0.00015744240046241333
+    - 0.04333531051796383

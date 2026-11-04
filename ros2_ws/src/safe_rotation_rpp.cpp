@@ -252,6 +252,19 @@ public:
       short_reverse_plan_ ? -end.position.x : end.position.x,
       short_reverse_plan_ ? -end.position.y : end.position.y, remaining_length, xy_tolerance);
     const bool goal_rotation = has_reached_xy_tolerance_ || aligning_terminal_yaw_;
+    // A tiny endpoint can demand a very tight pure-pursuit arc even when its
+    // bearing is below the ordinary heading threshold. The downstream smoother
+    // caps angular speed and scales translation with it, taking the loaded base
+    // below its reliable approach speed. Align in place before that short move
+    // instead of repeatedly creeping around the endpoint.
+    const double approach_speed = short_reverse_plan_ ?
+      std::min(0.08, params_->min_approach_linear_velocity) :
+      params_->min_approach_linear_velocity;
+    const double endpoint_curvature = goal_xy_error > 0.0001 ?
+      2.0 * end.position.y / (goal_xy_error * goal_xy_error) : 0.0;
+    const bool tight_terminal_arc = !goal_rotation && remaining_length <= 0.15 &&
+      goal_xy_error <= 0.15 &&
+      std::abs(approach_speed * endpoint_curvature) > params_->rotate_to_heading_angular_vel;
     if (remaining_length <= 0.15) {
       RCLCPP_DEBUG_THROTTLE(logger_, *costmap_ros_->get_clock(), 1000,
         "terminal xy=(%.3f,%.3f) yaw=%.3f remaining=%.3f at=%d align=%d turning=%d angle=%.3f error=%.3f",
@@ -259,7 +272,7 @@ public:
         aligning_terminal_yaw_, turning_, angle, goal_yaw_error);
     }
     const double threshold = goal_rotation ? yaw_tolerance :
-      (target.at_turn ? 0.04 : (continue_terminal_tracking ? 0.80 :
+      ((target.at_turn || tight_terminal_arc) ? 0.04 : (continue_terminal_tracking ? 0.80 :
       params_->rotate_to_heading_min_angle));
     if (!turning_) {
       if (std::abs(angle) > threshold) {

@@ -119,6 +119,8 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME test_stop_envelope
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_stop_envelope.py)
+  add_test(NAME test_camera_floor_height
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_camera_floor_height.py)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_rotation_sweep test/test_rotation_sweep.cpp)
   target_include_directories(test_rotation_sweep PRIVATE include)
@@ -185,7 +187,10 @@ install(
     scripts/wait_for_localization_tf
     scripts/astra_sim_range_filter
     scripts/publish_rgb_calibrated_cloud.py
+    scripts/floor_surface_model.py
+    scripts/check_camera_streams
     scripts/nav_path_display_filter
+    scripts/rviz_footprint_display
     scripts/cm029_teleop
     scripts/scan_self_filter
     scripts/keyboard_teleop

@@ -70,6 +70,68 @@ class RGBDTrackingTest(unittest.TestCase):
                         tracker.update(image,1_600_000_000)
                 self.assertFalse(tracker.active)
 
+    def test_tracking_neighbourhood_follows_pallet_at_different_image_locations(self):
+        for dx,dy in ((-220,-100),(0,0),(200,130)):
+            with self.subTest(offset=(dx,dy)):
+                place=np.float32([[1,0,dx],[0,1,dy]])
+                image=cv2.warpAffine(self.image,place,(640,480),borderValue=(45,45,45))
+                mask=cv2.warpAffine(self.mask.astype(np.uint8),place,(640,480),
+                                    flags=cv2.INTER_NEAREST).astype(bool)
+                bbox=self.bbox+np.array([dx,dy,dx,dy])
+                tracker=PalletRGBTracker()
+                tracker.seed(image,mask,bbox,1_000_000_000)
+                center=tuple((bbox[:2]+bbox[2:])/2)
+                move=cv2.getRotationMatrix2D(center,2,1.02)
+                move[:,2]+=(8,-4)
+                current=cv2.warpAffine(image,move,(640,480),borderValue=(45,45,45))
+                tracked,_=tracker.update(current,1_100_000_000)
+                expected=cv2.warpAffine(mask.astype(np.uint8),move,(640,480),
+                                       flags=cv2.INTER_NEAREST).astype(bool)
+                self.assertGreater(np.sum(tracked&expected)/np.sum(tracked|expected),.97)
+                self.assertTrue(all(score>=.75 for score in tracker.scores))
+
+    def test_short_gap_reverifies_both_legs_and_requires_new_current_depth_confirmations(self):
+        self.args.rgb_gap_recovery=True
+        estimator=RGBDTargetEstimator(self.args)
+        for i in range(3):
+            try:
+                first=estimator.process(self.image,self.depth,self.intrinsics,
+                    1_000_000_000+i*33_000_000,self.seed() if i==0 else None)
+            except ValueError as exc:
+                self.assertIn('confirming front legs',str(exc))
+        moved=cv2.warpAffine(self.image,np.float32([[1,0,5],[0,1,2]]),
+                            (640,480),borderValue=(45,45,45))
+        with self.assertRaisesRegex(ValueError,'confirming front legs 1/3'):
+            estimator.process(moved,self.depth+100,self.intrinsics,1_700_000_000)
+        self.assertTrue(estimator.tracker.reverified)
+        self.assertTrue(estimator.tracker.active)
+        with self.assertRaisesRegex(ValueError,'confirming front legs 2/3'):
+            estimator.process(moved,self.depth+100,self.intrinsics,1_733_000_000)
+        current=estimator.process(moved,self.depth+100,self.intrinsics,1_766_000_000)
+        self.assertGreater(current['camera_forward_m']-first['camera_forward_m'],.08)
+        self.assertEqual(estimator.seed_stamp_ns,1_000_000_000)
+        self.assertEqual(estimator.tracker.stamp_ns,1_766_000_000)
+
+    def test_gap_reverification_rejects_hidden_leg_inconsistent_motion_and_expires(self):
+        for mode in ('blank','one_leg','different_motion'):
+            with self.subTest(mode=mode):
+                tracker=PalletRGBTracker(allow_gap_recovery=True)
+                tracker.seed(self.image,self.mask,self.bbox,1_000_000_000)
+                image=self.image.copy()
+                if mode=='blank': image[:]=45
+                elif mode=='one_leg': image[255:310,365:400]=45
+                else:
+                    for a,b,shift in ((265,295,8),(365,395,-8)):
+                        patch=self.image[255:310,a:b].copy()
+                        image[255:310,a:b]=45
+                        image[255:310,a+shift:b+shift]=patch
+                with self.assertRaisesRegex(ValueError,'RGB re-verification pending'):
+                    tracker.update(image,1_700_000_000)
+                self.assertTrue(tracker.active)
+                with self.assertRaisesRegex(ValueError,'RGB tracking gap'):
+                    tracker.update(image,2_600_000_000)
+                self.assertFalse(tracker.active)
+
     def test_no_yolo_needed_after_seed_and_depth_is_current(self):
         estimator = RGBDTargetEstimator(self.args)
         for i in range(2):

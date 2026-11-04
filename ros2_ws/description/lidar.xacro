@@ -11,11 +11,11 @@
     <!-- Designed mast-bracket scan height; the installed real/simulated A1M8
          currently uses the lower temporary chassis mount below. -->
     <xacro:property name="lidar_scan_height_ground" value="0.835"/>
-    <!-- Validated real-robot lidar extrinsic, shared with Gazebo. -->
+    <!-- LiDAR configured parallel to the chassis, shared with Gazebo. -->
     <xacro:property name="lidar_installed_x" value="-0.2115"/>
     <xacro:property name="lidar_installed_y" value="0.0"/>
     <xacro:property name="lidar_installed_z" value="0.385"/>
-    <xacro:property name="lidar_installed_yaw" value="${-2.0 * pi / 180.0}"/>
+    <xacro:property name="lidar_installed_yaw" value="0.0"/>
 
     <material name="lidar_black">
         <color rgba="0.035 0.040 0.045 1"/>

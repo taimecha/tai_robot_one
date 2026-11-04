@@ -12,11 +12,16 @@ def generate_launch_description():
         DeclareLaunchArgument('min_y', default_value='-0.155'),
         DeclareLaunchArgument('max_y', default_value='0.155'),
         DeclareLaunchArgument('speckle_max_difference', default_value='0.0'),
+        DeclareLaunchArgument('max_scan_age_s', default_value='0.30'),
         Node(
             package='tai_robot_one',
             executable='scan_self_filter',
             name='scan_self_filter',
             output='screen',
+            # This sensor relay owns no actuator. Restore its data source if
+            # it exits unexpectedly; control guards still stop on stale scans.
+            respawn=True,
+            respawn_delay=1.0,
             parameters=[{
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'input_topic': '/scan',
@@ -31,6 +36,8 @@ def generate_launch_description():
                     LaunchConfiguration('max_y'), value_type=float),
                 'speckle_max_difference': ParameterValue(
                     LaunchConfiguration('speckle_max_difference'), value_type=float),
+                'max_scan_age_s': ParameterValue(
+                    LaunchConfiguration('max_scan_age_s'), value_type=float),
             }],
         ),
     ])

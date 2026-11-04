@@ -1,0 +1,134 @@
+profile: lateral_checkpoint_left45_user_trial_20261104
+status: Experimental single checkpoint reference; other distances and orientations
+  not validated
+source: Thirty valid /pallet/target samples per pose; static tape references. Camera
+  ahead of chassis 0.0665 m, pitch approx 20 deg, existing spatial depth correction
+  unchanged.
+fit_confidence_threshold: 0.6
+check_confidence_threshold: 0.75
+evaluated_fork_root_forward_range_m:
+- 1.195
+- 1.8
+lateral_reference_bounds_m:
+- -0.05
+- -0.045
+face_yaw_reference_bounds_deg:
+- 0.13545076306158732
+- 0.2709000121288595
+wheel_track_measured_m: 0.423
+forward_bias_m: 0.038429884910583446
+lateral_bias_m: -0.013009959533810615
+face_yaw_bias_deg: 0.8962719685723746
+motion_qualified: false
+current_validation:
+  near_capture: camera/detect_astra/data/calibration/lateral_capture_20261104_134844/capture.json
+  far_holdout_capture: camera/detect_astra/data/calibration/lateral_capture_20261104_133749/capture.json
+  reference_near_m: 0.01
+  reference_far_m: 0.01
+  references_approximate: true
+  reference_uncertainty_m: null
+  near_raw_m: -0.015978185459971428
+  far_raw_m: -0.01616763509809971
+  candidate_offset_m: 0.02597818545997143
+  far_corrected_m: 0.009810550361871721
+  far_median_error_m: -0.0001894496381282789
+  far_p95_absolute_error_m: 0.0002470854669809324
+  near_root_forward_m: 1.4773163175582886
+  far_root_forward_m: 1.7185665941238404
+  near_heading_deg: 2.309291440692954
+  same_lateral_only: true
+  motion_qualified: false
+  reason: Near/far references support a constant offset in the current centered setup,
+    but previous side poses disagreed. Requires fresh off-center holdout before installation.
+    No mounting-yaw change established.
+prior_profile_validation:
+  fork_root_m:
+    median_error_after: -0.005540728569030762
+    p95_absolute_error_after: 0.00614011287689209
+    max_absolute_error_after: 0.006175518035888672
+    nominal_reference_is_midpoint_of_measured_bounds: false
+  lateral_m:
+    median_error_after: 0.0012422750393549647
+    p95_absolute_error_after: 0.0015186915795008388
+    max_absolute_error_after: 0.0015186915795008388
+    nominal_reference_is_midpoint_of_measured_bounds: true
+  face_yaw_deg:
+    median_error_after: 0.1684073986718689
+    p95_absolute_error_after: 0.7036282549309247
+    max_absolute_error_after: 0.7769455840538144
+    nominal_reference_is_midpoint_of_measured_bounds: true
+prior_profile_live_verification:
+  label: verify_live_bias_pose_1590
+  same_pose_as_independent_check: true
+  sample_count: 30
+  confidence_threshold: 0.6
+  nms_iou: 0.3
+  summary:
+    fork_root_m:
+      truth: 1.59
+      median: 1.5874920463562012
+      median_error: -0.0025079536437988548
+      sample_stddev: 0.0005233279708705663
+      min: 1.5865167951583863
+      max: 1.5885606384277344
+      p95_absolute_error: 0.003307251930236843
+    lateral_m:
+      truth: -0.0475
+      median: -0.046428654342889786
+      median_error: 0.0010713456571102148
+      sample_stddev: 0.0006999656658419927
+      min: -0.04785924404859543
+      max: -0.04633326828479767
+      p95_absolute_error: 0.0011523558199405676
+    face_yaw_deg:
+      truth: 0.2031753875952234
+      median: -0.021099238917459545
+      median_error: -0.22427462651268296
+      sample_stddev: 0.24235392500486955
+      min: -0.5614857859220945
+      max: 0.43000197635670456
+      p95_absolute_error: 0.7017351743025193
+prior_profile_fit_labels:
+- fit_pose_1195_right_offset
+- fit_pose_140_right_offset
+- fit_pose_180_right_offset
+prior_profile_independent_check_label: check_pose_1590_right_offset
+right40_holdout:
+  capture: camera/detect_astra/data/calibration/lateral_capture_20261104_135638/capture.json
+  truth_m: -0.04
+  reference_statement: Latest user value 4 cm, interpreted as rod right of vehicle
+    centerline per preceding measurement instruction
+  truth_is_approximate: true
+  uncertainty_m: null
+  offset_unchanged_m: 0.02597818545997143
+  raw_median_m: -0.0578041598200798
+  corrected_median_m: -0.031825974360108374
+  median_error_m: 0.008174025639891627
+  p95_absolute_error_m: 0.00843102224171162
+  acceptance_m: 0.01
+  passed: true
+  sample_count: 179
+  odometry_available: false
+  heading_deg: 1.031282578817409
+  refitted: false
+left62_holdout:
+  capture: camera/detect_astra/data/calibration/lateral_capture_20261104_140224/capture.json
+  truth_m: 0.062
+  truth_is_approximate: true
+  uncertainty_m: null
+  offset_unchanged_m: 0.02597818545997143
+  raw_median_m: 0.053064975887537
+  corrected_median_m: 0.07904316134750844
+  median_error_m: 0.01704316134750844
+  p95_absolute_error_m: 0.0171539440304041
+  acceptance_m: 0.01
+  passed: false
+  sample_count: 180
+  odometry_available: false
+  refitted: false
+checkpoint45_fit:
+  capture: camera/detect_astra/data/calibration/lateral_capture_20261104_143534/capture.json
+  truth_lateral_m: 0.045
+  raw_lateral_m: 0.058009959533810614
+  reference_uncertainty_m: null
+  independent_pose_validated: false

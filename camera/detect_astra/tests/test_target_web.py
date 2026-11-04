@@ -20,10 +20,22 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 from detected_pallets_interfaces.msg import PalletTarget
 from test_pallets import (TargetWebSource, WebPreview, TARGET_FRAME,
-                          position_from_measurement)
+                          position_from_measurement, alignment_display_reason)
 
 
 class ForkAlignmentDisplayTest(unittest.TestCase):
+    def test_recovered_odometry_does_not_hide_the_current_rgbd_gate(self):
+        status=dict(state='LOST_DATA',active=False,ready=False,
+                    reason='Odometry không hợp lệ',ready_reason='Chờ RGB-D ổn định 5 giây')
+        self.assertEqual(alignment_display_reason(status),status['ready_reason'])
+        status['ready']=True
+        self.assertIn('Dữ liệu đã phục hồi',alignment_display_reason(status))
+        status['ready']=False
+        status['active']=True
+        self.assertEqual(alignment_display_reason(status),status['reason'])
+        status.update(active=False,state='NAV_FAILED',reason='Không tìm được đường')
+        self.assertEqual(alignment_display_reason(status),'Không tìm được đường')
+
     def test_display_preserves_small_angles_and_real_geometry(self):
         msg = SimpleNamespace(chassis_front_forward_m=1.657, opening_lateral_m=-0.049,
                               face_yaw_rad=math.radians(-3.8), entry_heading_rad=math.radians(3.8))
@@ -112,12 +124,12 @@ class TargetWebIntegrationTest(unittest.TestCase):
 
     def test_filtered_heading_tolerance_and_invalid_reset(self):
         msg = self.message()
-        msg.face_yaw_rad = -math.radians(1.4)
-        msg.entry_heading_rad = math.radians(1.4)
+        msg.face_yaw_rad = -math.radians(.4)
+        msg.entry_heading_rad = math.radians(.4)
         self.publish_with_image(msg)
         self.wait_for(lambda: self.status()['measurement'] is not None)
         m = self.status()['measurement']
-        self.assertAlmostEqual(m['filtered_fork_alignment_deg'], 1.4)
+        self.assertAlmostEqual(m['filtered_fork_alignment_deg'], .4)
         self.assertFalse(m['heading_correction_required'])
         self.assertAlmostEqual(m['lateral_m'], .2)  # Within heading tolerance still has lateral error.
 
@@ -214,11 +226,61 @@ class TargetWebIntegrationTest(unittest.TestCase):
                     self.assertEqual(json.load(response)['message'], 'Alignment confirmed')
             self.assertEqual(calls, [True, False])
             self.assertIsNone(self.status()['recognition']['enabled'])
+            payload.update(execute=True,ready=False,active=True,state='LIFTING',
+                           strategy='pallet_insertion_odom',reason='Đang nâng càng',
+                           standoff_m=.04)
+            publisher.publish(String(data=json.dumps(payload)))
+            self.wait_for(lambda:self.status().get('alignment',{}).get('state')=='LIFTING')
+            self.assertTrue(self.status()['alignment']['available'])
+            self.assertTrue(self.status()['alignment']['active'])
+            req = urllib.request.Request(self.url+'/alignment',
+                    data=json.dumps({'enabled': False}).encode(),
+                    headers={'Content-Type': 'application/json'}, method='POST')
+            with urllib.request.urlopen(req,timeout=3) as response:
+                self.assertEqual(json.load(response)['message'],'Alignment confirmed')
+            self.assertEqual(calls,[True,False,False])
             self.wait_for(lambda: not self.status()['alignment']['available'], timeout=2)
             self.assertNotIn('errors', self.status()['alignment'])
             publisher.publish(String(data='{"execute":true}'))
             self.wait_for(lambda: self.source.alignment_status is None)
         finally:
+            self.source.node.destroy_service(service)
+            self.node.destroy_publisher(publisher)
+
+    def test_alignment_http_waits_for_rgbd_admission_beyond_three_seconds(self):
+        import threading
+        from rclpy.callback_groups import ReentrantCallbackGroup
+        from rclpy.task import Future
+        from std_msgs.msg import String
+        from std_srvs.srv import SetBool
+        calls=[];timers=[]
+        async def accept(request,response):
+            calls.append(request.data)
+            if request.data:
+                done=Future(executor=self.source.executor)
+                timer=threading.Timer(3.5,lambda:done.set_result(True))
+                timers.append(timer);timer.start()
+                await done
+            response.success,response.message=True,'RGB-D ready'
+            return response
+        service=self.source.node.create_service(SetBool,'/pallet/alignment/set_enabled',accept,
+            callback_group=ReentrantCallbackGroup())
+        publisher=self.node.create_publisher(String,'/pallet/alignment/status',1)
+        try:
+            self.wait_for(lambda:publisher.get_subscription_count()
+                          and self.source.alignment_client.service_is_ready())
+            payload=dict(execute=False,ready=True,active=False,state='IDLE',reason='Ready',
+                         ready_reason='',standoff_m=1.2,linear_mps=0.,angular_rps=0.,errors=None)
+            publisher.publish(String(data=json.dumps(payload)))
+            self.wait_for(lambda:self.status().get('alignment',{}).get('available'))
+            request=urllib.request.Request(self.url+'/alignment',
+                data=json.dumps({'enabled':True}).encode(),
+                headers={'Content-Type':'application/json'},method='POST')
+            with urllib.request.urlopen(request,timeout=6) as response:
+                self.assertEqual(json.load(response)['message'],'RGB-D ready')
+            self.assertEqual(calls,[True])  # No web-generated premature Stop.
+        finally:
+            for timer in timers:timer.cancel();timer.join()
             self.source.node.destroy_service(service)
             self.node.destroy_publisher(publisher)
 
@@ -238,6 +300,8 @@ class TargetWebIntegrationTest(unittest.TestCase):
 
             self.post_enabled(True)
             self.wait_for(lambda: self.status()['recognition']['enabled'] is True)
+            prior_search = target_node.semantic_search
+            prior_search.window = (160,160,480,400)
             enabled, generation = target_node.inference_state()
             self.assertTrue(enabled)
             target_node.receive('rgb', Image())
@@ -265,6 +329,9 @@ class TargetWebIntegrationTest(unittest.TestCase):
 
             self.post_enabled(True)
             self.wait_for(lambda: self.status()['recognition']['enabled'] is True)
+            self.assertIsNot(target_node.semantic_search,prior_search)
+            prior_search.window = (0,0,320,240)  # late result from an old generation
+            self.assertIsNone(target_node.semantic_search.window)
             self.assertFalse(target_node.publish_result(PalletDetection(), generation))
             self.wait_for(lambda: self.status()['measurement'] is None)
             self.publish_with_image(self.message())

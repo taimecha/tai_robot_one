@@ -1,5 +1,98 @@
 # Theo dõi và đo pallet độc lập với YOLO
 
+## Tìm pallet ở vị trí thay đổi, 2026-11-01
+
+Detector tìm toàn bộ ảnh ở đầu mỗi lượt, dùng đề xuất YOLO để chọn vùng phóng
+to trên **ảnh mới tiếp theo**. Vùng này theo vị trí/kích thước của đối tượng;
+không lưu tọa độ pixel của pallet hiện tại. Mất mục tiêu trong vùng phóng to
+thì trở lại tìm toàn ảnh. Mỗi lượt nhận diện lại bắt đầu từ toàn ảnh.
+
+Đề xuất yếu chỉ phục vụ tìm kiếm. Seed vẫn cần confidence ≥0,75, mask không
+bị cắt ở biên và đủ hai chân trước. Mask/bbox được đưa về ảnh RGB gốc 640×480
+trước khi dùng với Depth và K/D; không thay intrinsics, TF hay hệ số bù để
+làm góc nhỏ hơn. Có nhiều mục tiêu phù hợp thì báo chưa xác định được, không
+tự chọn mục tiêu có confidence lớn nhất.
+
+`--target-color green` chọn pallet xanh khi còn pallet gỗ khác trong ảnh;
+màu chỉ lọc danh tính trong các kết quả YOLO, không tự tạo seed/mask hình học.
+Vị trí pallet xanh có thể thay đổi. Bỏ tùy chọn này dùng chế độ `any`, yêu cầu
+một pallet duy nhất phù hợp. Nếu có nhiều pallet giống nhau, cần chọn danh
+tính mục tiêu trước khi căn; hệ thống không tự đoán pallet nào cần lấy.
+
+Chân nhựa ít hoa văn được tìm thêm đặc trưng trong phạm vi tối đa 4 pixel
+quanh từng chân. Vẫn giữ số đặc trưng tối thiểu, optical flow hai chiều,
+inlier trên cả hai chân, tương quan ảnh, kiểm tra Depth và tuổi dữ liệu.
+
+NCNN tự dùng phép tính FP16 khi CPU ARM có hỗ trợ, còn lại dùng FP32. Có thể
+ép FP32 bằng `--ncnn-precision float32`. Model được warmup sau khi cấu hình
+backend xong, trước khi tính thời gian nhận diện. Hai tiến trình dùng hồ sơ
+FastDDS cho ảnh lớn giống camera; chỉ thay cách vận chuyển/xử lý, không nới
+giới hạn đồng bộ hay độ mới.
+
+Model chạy trên Pi được xuất từ cùng `models/best_v3.pt` với đầu vào mạng
+288×384 để dành CPU cho Nav2 và đo RGB-D. Ảnh camera, mask seed và hệ tọa độ
+đo vẫn là 480×640; loader lấy đúng kích thước mạng từ metadata của model.
+Đường dẫn `data/runtime_models/best_v3_ncnn_model` trỏ tới bản chạy đã chọn;
+bản cũ được giữ ở thư mục backup. Khi dựng máy mới, tái tạo bằng:
+
+```bash
+.venv/bin/python scripts/export_pallet_ncnn.py --activate
+```
+
+Kiểm tra nhận diện từ ảnh ghi thực, sau đó dịch ảnh trái/phải/lên trên và đổi
+kích thước 0,8×/1,15×: cả sáu trường hợp có mask đủ hai chân, confidence
+0,915–0,960, thời gian suy luận 158–265 ms trong lượt kiểm tra này. Đây là
+biến đổi ảnh để kiểm tra tìm kiếm độc lập vị trí, chưa phải sáu tư thế xe thực.
+Replay 50 cặp RGB-D gốc có hai mẫu xác nhận ban đầu, sau đó 48/48 hợp lệ.
+
+Ghép RGB/Depth ưu tiên timestamp chụp, không ưu tiên callback vừa đến muộn.
+Loại ảnh chụp quá 250 ms, không đưa timestamp RGB lùi vào tracker. Khởi động
+nhận diện tự động chờ RGB mới đầu tiên rồi mới tính thời gian 3–5 giây.
+Theo dõi quang học dùng vùng bao cả đặc trưng gốc và vị trí dự đoán, tự thay
+đổi theo pallet; giữ hệ tọa độ pixel toàn ảnh và mọi ngưỡng kiểm tra cũ.
+Seed trễ được nối qua các ảnh RGB đã quan sát với từng khoảng dưới giới hạn
+500 ms; không dùng việc replay làm số đo Depth cũ trở thành mới.
+
+Kiểm chứng sau cùng trên Pi cùng Nav2, xe/pallet đứng yên: YOLO tự tắt sau
+xác nhận; 900/900 phép đo hợp lệ trong 60,00 s (15,00 Hz), khoảng ngắt lớn
+nhất 165,8 ms. Tuổi phép đo 25,3–163,0 ms, RGB/Depth lệch −34,7…+17,6 ms.
+Biên độ X 3,18 mm, Y 0,453 mm, hướng 0,959°. Tất cả tiêu chí của
+`verify_pallet_handoff.py` đạt, gồm không có seed/suy luận YOLO mới và cửa
+sổ cuối vẫn ổn định. Báo cáo local:
+`data/diagnostics/pallet_adaptive_handoff_20261101_release.json`.
+Các số đo/lượt chưa đạt ở những mục lịch sử bên dưới là phiên bản trước.
+
+Giới hạn đã quan sát trước bước xác minh RGB bổ sung: chạy thêm bộ kiểm
+thử ROS đồng thời trên Pi gây ngắt RGB 528 ms, làm hủy khóa mục tiêu.
+Lượt 60 giây đạt ở trên chạy cùng Nav2, không kèm tải kiểm thử đó.
+
+Khi RGB ngắt quá 500 ms, optical flow vẫn không được nối qua khoảng ngắt.
+Mặc định có thể giữ **tham chiếu hình ảnh**, tối đa 1,5 giây, để xác minh
+lại bằng hai phép khớp template độc lập trên ảnh hiện tại: NCC mỗi chân
+≥0,90, hai chân phải có dịch chuyển nhất quán trong 2 pixel và đủ đặc trưng
+RGB hiện tại. Không qua các kiểm tra này thì không có phép đo hợp lệ; hết
+1,5 giây phải nhận diện YOLO lại. Khi xác minh thành công, xóa lịch sử hình
+học, yêu cầu lại ba phép đo Depth mới và cửa sổ chất lượng 5 giây trước khi
+cho phép căn xe. Không giữ lại khoảng cách/góc cũ thành dữ liệu mới, không
+tự bật YOLO. Có thể tắt cơ chế này bằng `--no-rgb-gap-recovery` để dùng chính
+sách mất tham chiếu ngay sau 500 ms như trước.
+
+Camera đã chạy cùng Nav2: chỉ mở bộ nhận diện/đo, không mở thêm driver hoặc
+bộ chạy căn xe thật. Từ thư mục `camera/detect_astra`:
+
+```bash
+bash scripts/open_pallet_target.sh \
+  --model data/runtime_models/best_v3_ncnn_model --cpu-threads 2 \
+  --target-color green --heading-floor-reference \
+  --measurement-bias-yaml config/calibration/pallet_target_bias_2026_10_31.yaml
+```
+
+Lệnh này nhận diện ngay khi xe đứng yên. Để chờ goal nhận diện **mới** thành
+công, thêm `--recognize-after-goal`. Không chạy song song hai bộ nhận diện.
+Sau khi xác nhận, YOLO tự tắt và RGB-D được kiểm tra tiếp theo cửa sổ 5 giây
+cũ. Điều kiện đứng yên đạt chưa thay cho kiểm chứng khi xe chuyển động; không
+có lệnh motor hoặc goal điều hướng do các node nhận diện/đo phát ra.
+
 Sửa góc giữa hai mặt phẳng bằng tham chiếu sàn, giữ nguyên vị trí:
 [HEADING_REFERENCE.md](HEADING_REFERENCE.md). Web hiện độ lớn góc giữa mặt
 trước xe và mặt trước pallet; các góc có dấu và hướng tới tâm lỗ giữ ở phần phụ.
@@ -54,7 +147,7 @@ Sau khi model sẵn sàng, YOLO tự nhận diện 3–5 giây rồi tắt. Đ�
 
 Đã có theo dõi và đo, lọc góc trên web, báo không cần chỉnh hướng khi |góc sau lọc| < 2°.
 Bộ căn riêng `scripts/align_pallet.py` tạo điểm chờ trong `odom`, mặc định chỉ xuất vận tốc đề xuất.
-Điểm dừng gốc càng 1,20 m, sai số X tối đa ±2 cm, lệch ngang dưới 2 cm, góc dưới 2°.
+Bộ chạy mới chọn goal gần nhất trên pháp tuyến pallet, giữ mặt pallet → gốc càng tối thiểu 1,20 m (chừa 10 cm), rồi sửa góc; lệch ngang dưới 2 cm, góc dưới 2°. Xem ALIGNMENT.md cho luồng Nav2 mới.
 Xem [ALIGNMENT.md](ALIGNMENT.md) về nút căn riêng, lớp tránh vật cản và điều kiện chạy thật.
 Các node nhận diện/đo không phát lệnh xe. Chưa có tiến càng trong vùng mù hoặc nâng hàng.
 

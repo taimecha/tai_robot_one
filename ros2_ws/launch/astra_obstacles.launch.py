@@ -8,7 +8,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -23,38 +23,48 @@ def generate_launch_description():
         'astra_pro_rgb_640x480_2026-10-11.yaml')
     depth_correction = os.path.join(
         robot_share, 'config', 'calibration',
-        'astra_pro_depth_x_skew_preview.yaml')
+        'astra_pro_nav_floor_2026_11_02_restart.yaml')
+    camera_transport = os.path.join(robot_share, 'config', 'camera_fastdds.xml')
     return LaunchDescription([
         DeclareLaunchArgument('camera_scan_hz', default_value='15.0'),
-        DeclareLaunchArgument('camera_cloud_pixel_stride', default_value='2'),
-        IncludeLaunchDescription(
-            AnyLaunchDescriptionSource(os.path.join(
-                astra_share, 'launch', 'astra_pro.launch.xml')),
-            launch_arguments={
-                'depth_registration': 'true',
-                'enable_color': 'true',
-                'use_uvc_camera': 'true',
-                'color_info_url': 'file://' + rgb_calibration,
-                'enable_ir': 'false',
-                'enable_depth': 'true',
-                'enable_point_cloud': 'false',
-                'enable_colored_point_cloud': 'false',
-                'publish_tf': 'true',
-                'tf_publish_rate': '0.0',
-                'queue_size': '1',
-                'color_width': '640',
-                'color_height': '480',
-                'color_fps': '15',
-                'depth_width': '640',
-                'depth_height': '480',
-                'depth_fps': '30',
-            }.items(),
-        ),
+        DeclareLaunchArgument('camera_cloud_pixel_stride', default_value='3'),
+        GroupAction([
+            SetEnvironmentVariable('FASTRTPS_DEFAULT_PROFILES_FILE', camera_transport),
+            SetEnvironmentVariable('FASTDDS_DEFAULT_PROFILES_FILE', camera_transport),
+            IncludeLaunchDescription(
+                AnyLaunchDescriptionSource(os.path.join(
+                    astra_share, 'launch', 'astra_pro.launch.xml')),
+                launch_arguments={
+                    'depth_registration': 'true',
+                    'enable_color': 'true',
+                    'use_uvc_camera': 'true',
+                    'color_info_url': 'file://' + rgb_calibration,
+                    'enable_ir': 'false',
+                    'enable_depth': 'true',
+                    'enable_point_cloud': 'false',
+                    'enable_colored_point_cloud': 'false',
+                    'publish_tf': 'true',
+                    'tf_publish_rate': '0.0',
+                    'queue_size': '1',
+                    'color_width': '640',
+                    'color_height': '480',
+                    'color_fps': '15',
+                    'depth_width': '640',
+                    'depth_height': '480',
+                    'depth_fps': '30',
+                }.items(),
+            ),
+        ]),
         Node(
             package='tai_robot_one',
             executable='publish_rgb_calibrated_cloud.py',
             name='spatial_depth_cloud',
             output='screen',
+            additional_env={
+                'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1',
+                'FASTRTPS_DEFAULT_PROFILES_FILE': camera_transport,
+                'FASTDDS_DEFAULT_PROFILES_FILE': camera_transport,
+            },
             parameters=[depth_correction, {
                 'pixel_stride': ParameterValue(
                     LaunchConfiguration('camera_cloud_pixel_stride'), value_type=int),

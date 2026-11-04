@@ -11,7 +11,7 @@ from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.task import Future
 from rclpy.parameter import parameter_value_to_python
-from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from rcl_interfaces.srv import GetParameters
 from lifecycle_msgs.srv import GetState
 from geometry_msgs.msg import PoseStamped, Twist, Point
@@ -23,14 +23,29 @@ from visualization_msgs.msg import Marker, MarkerArray
 import yaml
 from detected_pallets_interfaces.msg import PalletTarget
 from pallet_alignment_core import AlignmentConfig, AlignmentController, OdomSample, wrap
+from pallet_laser_timing import LASER_TIMEOUT_S, validate_stop_polygon
 
 ROOT = Path(__file__).resolve().parents[1]
 FRAME = 'camera_color_optical_frame'
 COMMAND = '/pallet/alignment/cmd_vel'
+# A rolling five-second qualification window needs time to replace a bad
+# sample/gap. This only extends admission waiting, never sensor freshness.
+START_DATA_TIMEOUT_S = 20.0
 
 
 def stamp_seconds(stamp):
     return stamp.sec + stamp.nanosec * 1e-9
+
+
+def rgbd_wait_reason(health):
+    reason='Chờ cửa sổ RGB-D ổn định 5 giây trước khi chạy'
+    try:
+        fps,ratio,gap=(float(health[k]) for k in ('valid_fps','valid_ratio','max_gap_s'))
+        if all(math.isfinite(v) for v in (fps,ratio,gap)):
+            reason+=f': {fps:.1f} Hz, hợp lệ {ratio*100:.0f}%, ngắt lớn nhất {gap:.2f} s'
+    except (TypeError,KeyError,ValueError):
+        pass
+    return reason
 
 
 class MotionGuard:
@@ -42,6 +57,9 @@ class MotionGuard:
         self.scan_stamp = self.scan_wall = None
         config = yaml.safe_load((ROOT / 'config/pallet_alignment_collision.yaml').read_text())
         expected = config['pallet_alignment_collision_monitor']['ros__parameters']
+        if expected['source_timeout'] != LASER_TIMEOUT_S:
+            raise ValueError('Laser watchdog and Collision Monitor must agree')
+        validate_stop_polygon(yaml.safe_load(expected['StopZone']['points']))
         # Verify the actual protection parameters, not just the lifecycle state.
         names = ['base_frame_id', 'odom_frame_id', 'cmd_vel_in_topic', 'cmd_vel_out_topic',
                  'source_timeout', 'transform_tolerance', 'base_shift_correction',
@@ -55,10 +73,15 @@ class MotionGuard:
         self.params = node.create_client(GetParameters, '/pallet_alignment_collision_monitor/get_parameters')
         self.stamper = node.create_client(GetParameters, '/cmd_vel_stamper/get_parameters')
         self.lifecycle = node.create_client(GetState, '/pallet_alignment_collision_monitor/get_state')
-        self.sub = node.create_subscription(LaserScan, '/scan_filtered', self.on_scan, qos_profile_sensor_data)
+        self.sub = node.create_subscription(LaserScan, '/scan_filtered', self.on_scan,
+            QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT))
         self.timer = node.create_timer(.5, self.poll)
 
     def on_scan(self, msg):
+        stamp=stamp_seconds(msg.header.stamp)
+        if (not -.05<=self.node.now()-stamp<=LASER_TIMEOUT_S
+                or (self.scan_stamp is not None and stamp<=self.scan_stamp)):
+            return
         if (math.isfinite(msg.angle_increment) and msg.angle_increment > 0
                 and 0 < msg.range_min < msg.range_max
                 and sum(math.isfinite(r) and msg.range_min <= r <= msg.range_max for r in msg.ranges) >= 2):
@@ -103,24 +126,24 @@ class MotionGuard:
             valid, received = self.checks.get(key, (False, 0))
             if not valid or wall-received > 1.0:
                 return False, 'Chưa xác minh lớp tránh vật cản và đường lệnh xe: ' + key
-        if (self.scan_stamp is None or not -.05 <= now-self.scan_stamp <= .3
-                or wall-self.scan_wall > .3):
-            return False, 'Laser /scan_filtered chưa có dữ liệu mới hợp lệ'
         expected = {COMMAND: 'pallet_alignment', '/cmd_vel_safe': 'pallet_alignment_collision_monitor',
                     '/base_controller/cmd_vel': 'cmd_vel_stamper'}
         for topic, name in expected.items():
             sources = self.node.get_publishers_info_by_topic(topic)
             if len(sources) != 1 or sources[0].node_name != name or sources[0].node_namespace != '/':
                 return False, 'Thiếu hoặc có nhiều nguồn lệnh tại ' + topic
+        if (self.scan_stamp is None or not -.05 <= now-self.scan_stamp <= LASER_TIMEOUT_S
+                or wall-self.scan_wall > LASER_TIMEOUT_S):
+            return False, 'Laser /scan_filtered chưa có dữ liệu mới hợp lệ'
         return True, ''
 
 
 class PalletAlignmentNode(Node):
-    def __init__(self, config=AlignmentConfig(), execute=False):
+    def __init__(self, config=AlignmentConfig(), execute=False, controller=None):
         super().__init__('pallet_alignment')
         if execute and config.allow_reverse:
             raise ValueError('Lượt thử thật đầu chưa hỗ trợ lùi; đặt allow_reverse: false')
-        self.core = AlignmentController(config)
+        self.core = controller if controller is not None else AlignmentController(config)
         self.execute = execute
         self.pending_target = None
         self.last_odom_wall = None
@@ -141,7 +164,8 @@ class PalletAlignmentNode(Node):
         self.goal_pub = self.create_publisher(PoseStamped, '/pallet/alignment/goal', 1)
         self.marker_pub = self.create_publisher(MarkerArray, '/pallet/alignment/markers', 1)
         self.guard = MotionGuard(self) if execute else None
-        self.create_subscription(Odometry, '/odom', self.on_odom, qos_profile_sensor_data)
+        self.create_subscription(Odometry, '/odom', self.on_odom,
+            QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT))
         self.create_subscription(PalletTarget, '/pallet/target', self.on_target, 1)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, '/pallet/recognition/status', self.on_recognition, latched)
@@ -196,9 +220,10 @@ class PalletAlignmentNode(Node):
             return False, 'Chưa có trạng thái mới xác nhận YOLO đã tắt'
         if self.yolo_enabled or self.recognition['enabled'] or self.recognition['busy']:
             return False, 'Chờ YOLO tắt và xử lý xong khung hình đang nhận diện'
-        if (not self.recognition['locked'] or self.recognition['phase'] != 'TRACKING'
-                or (require_measurement and not self.recognition['measurement_ready'])):
+        if not self.recognition['locked'] or self.recognition['phase'] != 'TRACKING':
             return False, 'Chưa nhận diện rõ pallet và có phép đo RGB + Depth ổn định'
+        if require_measurement and not self.recognition['measurement_ready']:
+            return False,rgbd_wait_reason(self.recognition.get('rgbd_health'))
         return True, ''
 
     def on_odom(self, msg):
@@ -206,12 +231,18 @@ class PalletAlignmentNode(Node):
         values = [p.x, p.y, q.x, q.y, q.z, q.w, t.linear.x, t.angular.z]
         stamp = stamp_seconds(msg.header.stamp)
         norm = sum(v*v for v in (q.x, q.y, q.z, q.w))
-        if (msg.header.frame_id != 'odom' or msg.child_frame_id not in ('base_footprint', 'base_link')
-                or not all(math.isfinite(v) for v in values) or abs(norm-1) > .02
-                or not -.05 <= self.now()-stamp <= self.core.config.odom_timeout_s):
-            self.core.stop('Odometry không hợp lệ', 'LOST_DATA')
+        age=self.now()-stamp
+        odom_issue=''
+        if msg.header.frame_id != 'odom' or msg.child_frame_id not in ('base_footprint','base_link'):
+            odom_issue=f'Odometry sai hệ tọa độ: {msg.header.frame_id} → {msg.child_frame_id}'
+        elif not all(math.isfinite(v) for v in values) or abs(norm-1)>.02:
+            odom_issue='Odometry có số không hợp lệ hoặc quaternion sai'
+        elif not -.05<=age<=self.core.config.odom_timeout_s:
+            odom_issue=f'Odometry quá hạn/lệch thời gian: {age*1000:.0f} ms'
+        if odom_issue:
+            self.core.stop(odom_issue, 'LOST_DATA')
             self.core.odom.samples.clear()
-            self.reject('Odometry sai hệ tọa độ, thời gian hoặc quaternion')
+            self.reject(odom_issue)
             return
         yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
         previous = self.core.odom.samples[-1] if self.core.odom.samples else None
@@ -306,13 +337,27 @@ class PalletAlignmentNode(Node):
                         self.measure_after_s = self.now()
                         self.pending_target = None
                         self.core.invalidate_target('Đã tắt YOLO; chờ các phép đo mới')
-                        ready_future = Future(executor=self.executor)
-                        self.start_waiter = (ready_future, time.monotonic()+1.2)
-                        ready, reason = await ready_future
-                        if epoch != self.start_epoch:
-                            ready, reason = False, 'Đã hủy yêu cầu căn chỉnh'
-                        if ready:
-                            ready, reason = self.core.start(self.now(), time.monotonic())
+                        deadline = time.monotonic()+START_DATA_TIMEOUT_S
+                        while True:
+                            ready_future = Future(executor=self.executor)
+                            self.start_waiter = (ready_future, deadline)
+                            ready, reason = await ready_future
+                            if epoch != self.start_epoch:
+                                ready, reason = False, 'Đã hủy yêu cầu căn chỉnh'
+                                break
+                            if ready:
+                                # A camera callback may invalidate the target
+                                # between timer completion and coroutine resume.
+                                # Keep the SAME bounded, stationary handshake;
+                                # never send another acquisition/start request.
+                                ready, reason = self.interlock()
+                                if ready:
+                                    ready, reason = self.core.readiness(self.now(), time.monotonic())
+                            if ready:
+                                ready, reason = self.core.start(self.now(), time.monotonic())
+                                break
+                            if time.monotonic() >= deadline:
+                                break
                         response.success, response.message = ready, reason
             finally:
                 if epoch == self.start_epoch:
@@ -348,6 +393,7 @@ class PalletAlignmentNode(Node):
                 self.start_waiter = None
         # Missing odometry also blocks dry run. No invented fixed pose.
         self.core.tick(self.now(), time.monotonic(), ready, reason)
+        self.before_command_publish()
         command = Twist()
         command.linear.x, command.angular.z = self.core.v, self.core.w
         self.proposed.publish(command)
@@ -356,12 +402,19 @@ class PalletAlignmentNode(Node):
         if time.monotonic()-self.last_publish >= .20:
             self.publish_status()
 
+    def before_command_publish(self):
+        """Optional additional command gate, before either publisher sees a command."""
+
+    def status_details(self):
+        return {}
+
     def publish_status(self):
         now, wall = self.now(), time.monotonic()
         self.last_publish = wall
         ready, reason = self.core.readiness(now, wall)
         safe, safety_reason = self.interlock()
         status = self.core.snapshot()
+        status.update(self.status_details())
         status.update(execute=self.execute, ready=ready and safe and not self.preparing,
                       preparing=self.preparing,
                       ready_reason=reason if not ready else safety_reason,
@@ -383,7 +436,9 @@ class PalletAlignmentNode(Node):
             marker.header = goal.header
             marker.ns, marker.id, marker.type, marker.action = 'pallet_alignment', 0, Marker.ARROW, Marker.ADD
             marker.pose.orientation.w = 1.
-            cx, cy, _ = self.core.target
+            # A staging controller can navigate from its odom snapshot while
+            # the live camera target is temporarily outside the image.
+            cx, cy, _ = self.core.target or getattr(self.core, 'frozen_target', None)
             marker.points = [Point(x=x, y=y, z=.05), Point(x=cx, y=cy, z=.05)]
             marker.scale.x, marker.scale.y, marker.scale.z = .025, .08, .10
             marker.color.r, marker.color.g, marker.color.b, marker.color.a = .2, .9, .7, 1.

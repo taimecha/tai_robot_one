@@ -1,12 +1,18 @@
-# Kiểm chứng nhận diện → theo dõi RGB-D, chưa căn xe thật
+# Kiểm chứng nhận diện → theo dõi RGB-D
+
+Cập nhật tác vụ 2026-11-02: bộ căn và lệnh đưa càng/nâng đã tách khỏi luồng đo; xem [ALIGNMENT.md](ALIGNMENT.md) và [PICKUP.md](PICKUP.md). Các hướng dẫn chỉ đo bên dưới không tự mở điều khiển chuyển động.
+
+Lượt sửa mới nhất ngày 2026-11-01 dùng tìm kiếm theo đối tượng và model NCNN
+288×384, giữ ảnh đo 480×640: 900/900 phép đo hợp lệ trong 60 giây cùng Nav2,
+toàn bộ tiêu chí đạt. Xem phần đầu [TRACKING.md](TRACKING.md) để lấy cách
+dựng/chạy và phạm vi kiểm chứng; các kết quả chưa đạt bên dưới là lịch sử.
 
 Góc giữa mặt phẳng trước xe và mặt pallet được kiểm tra riêng bằng tùy chọn
 `--heading-floor-reference`, giữ nguyên khoảng cách/X/Y. Kết quả đo mới nhất,
 kiểm tra mở lại và lệnh giao diện: [HEADING_REFERENCE.md](HEADING_REFERENCE.md).
 Các số liệu bên dưới là lịch sử các lượt dùng góc cũ.
 
-Luồng hiện tại chỉ chuẩn bị dữ liệu. Không mở `open_pallet_alignment_real.sh`
-hoặc bộ căn khác trong giai đoạn này. Node nhận diện/đo và công cụ kiểm chứng
+Luồng trong tài liệu này chỉ chuẩn bị dữ liệu; khi chỉ kiểm chứng camera không mở bộ căn. Node nhận diện/đo và công cụ kiểm chứng
 không phát vận tốc, gửi goal điều hướng hay nâng càng.
 
 ## Sau goal nhận diện
@@ -18,6 +24,7 @@ Mở bộ nhận diện/đo từ thư mục `camera/detect_astra`:
 ```bash
 bash scripts/open_pallet_target.sh \
   --model data/runtime_models/best_v3_ncnn_model --cpu-threads 2 \
+  --target-color green \
   --measurement-bias-yaml config/calibration/pallet_target_bias_2026_10_31.yaml \
   --recognize-after-goal
 ```

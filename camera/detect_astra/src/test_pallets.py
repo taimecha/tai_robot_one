@@ -70,12 +70,14 @@ Mất dấu sẽ xóa số đo; không tự bật YOLO hoặc di chuyển xe.</p
 </section>
 <section class="camera-card" style="padding:18px">
 <h2>Căn xe trước pallet</h2>
-<p>Điểm dừng: gốc càng cách mặt pallet <b id="align-standoff">1,20 m</b>.
-Đạt khi |lệch ngang| &lt; 2 cm, |góc| &lt; 2°, sai số khoảng cách ≤ 2 cm.</p>
+<p id="align-criteria">Goal gần nhất trên đường vuông góc qua tâm lỗ pallet.
+Khoảng cách tối thiểu từ mặt pallet tới gốc càng: <b id="align-standoff">1,20 m</b>.
+Đạt khi |lệch ngang| &lt; 1 cm và |góc| &lt; 1°.</p>
 <p id="align-mode" class="hint">Chưa kết nối bộ căn xe.</p>
 <p id="align-state" role="status">Đang chờ chương trình căn xe.</p>
 <div class="metrics">
-<div class="metric">Sai số khoảng cách<b id="align-distance">—</b></div>
+<div class="metric"><span id="align-distance-label">Dư khoảng cách so với tối thiểu</span><b id="align-distance">—</b></div>
+<div class="metric">Mặt pallet → gốc càng<b id="align-clearance">—</b></div>
 <div class="metric">Lệch ngang<b id="align-lateral">—</b></div>
 <div class="metric">Góc lệch đã lọc<b id="align-heading">—</b></div>
 </div>
@@ -85,7 +87,8 @@ Mất dấu sẽ xóa số đo; không tự bật YOLO hoặc di chuyển xe.</p
 <p id="align-result" role="status"></p>
 <p class="hint">Chỉ căn tới vị trí chờ; chưa tiến càng vào pallet hoặc nâng hàng.
 Khi bấm căn: tắt YOLO, đợi xử lý xong và lấy phép đo mới trước khi căn.
-Mất dữ liệu hoặc điều kiện chạy không đạt: dừng lệnh xe.</p>
+Nav2 dùng vị trí pallet đã chốt trong odom khi đi tới goal; mất odometry/laser hoặc đường bị chặn sẽ dừng.
+Sau khi tới goal, xe đứng yên lấy RGB-D mới rồi mới sửa góc. Nếu mất dấu: nhận diện lại rồi bấm căn tiếp.</p>
 </section>
 <section class="camera-card">
 <header class="camera-head"><h2 id="camera-title">Camera pallet</h2>
@@ -120,7 +123,7 @@ Gốc càng nằm trước mép thân xe 0,065 m; ô gốc càng đo khoảng ti
 Khoảng cách hiển thị là khoảng cách trên mặt phẳng sàn tới tâm lỗ ở mặt trước pallet.</p>
 <p class="hint">Góc chính là độ lệch giữa mặt phẳng trước xe và mặt phẳng trước pallet khi nhìn từ trên xuống.
 0° nghĩa hai mặt song song. Góc được làm mượt theo thời gian và làm tròn đến 0,1°.
-Góc sau lọc dưới 2°: hai mặt nằm trong ngưỡng song song đã chọn; vẫn giữ số góc, không quy về 0°.
+Góc sau lọc dưới 1°: hai mặt nằm trong ngưỡng song song đã chọn; vẫn giữ số góc, không quy về 0°.
 Vị trí tâm lỗ lệch ngang được thể hiện riêng ở ô Y và vẫn cần kiểm tra khi căn càng.</p>
 <p class="hint">Box = hàng; pallets và emty pallet = pallet. Đóng chương trình bằng Ctrl+C trong terminal.</p>
 </main><script>
@@ -132,16 +135,36 @@ let controlBusy=false;
 let alignmentBusy=false;
 function showVehicleAlignment(a){
   const available=a?.available===true;
+  const staging=a?.strategy==='nearest_normal_nav2';
+  const handling=a?.strategy==='pallet_insertion_odom';
   const states={IDLE:'Chờ bắt đầu',BLOCKED:'Chưa đủ điều kiện',ALIGNING:'Đang căn',
     SETTLING:'Đang kiểm tra ổn định',ALIGNED:'Đã căn đạt',WAIT_DATA:'Dừng chờ dữ liệu',
-    LOST_DATA:'Mất dữ liệu, cần bắt đầu lại',REPOSITION_REQUIRED:'Cần đặt lại xe',TIMEOUT:'Hết thời gian'};
+    LOST_DATA:'Mất dữ liệu, cần bắt đầu lại',REPOSITION_REQUIRED:'Cần đặt lại xe',TIMEOUT:'Hết thời gian',
+    PLANNING:'Đang chọn goal và kiểm tra đường',NAVIGATING:'Nav2 đang tới goal căn ngang',
+    NAV_STOPPING:'Đang dừng tại goal',CHECKING:'Đang kiểm tra RGB-D mới',TURNING:'Đang sửa góc',
+    TOO_CLOSE:'Khoảng cách dưới mức cho phép',NO_SAFE_GOAL:'Không có goal/đường hợp lệ',
+    NAV_FAILED:'Nav2 chưa hoàn tất',REACQUIRE_REQUIRED:'Cần nhận diện lại rồi căn tiếp',
+    LATERAL_NOT_REACHED:'Chưa đạt sai số ngang',PREVIEW_READY:'Đã kiểm tra goal, xe đứng yên',
+    INSERTING:'Đang đưa càng theo quỹ đạo',STOPPING:'Đang phanh trước pallet',
+    INSERTED:'Đã đưa càng vào, xe đứng yên',LIFTING:'Đang nâng càng',
+    COMPLETE:'Đã đạt cao độ càng',STOPPED:'Đã dừng xe và càng'};
   document.getElementById('align-mode').textContent=!available?'Chưa kết nối bộ căn xe.':
+    handling?'CHẠY THẬT · đưa càng/nâng bằng lệnh terminal.':
     a.execute?'CHẠY THẬT · bấm bắt đầu mới gửi lệnh căn xe.':'KIỂM TRA · chỉ xem lệnh dự kiến, xe đứng yên.';
+  const terminal=available&&!a.active&&!a.preparing&&a.state!=='IDLE';
+  const reason=available?(a.display_reason||(terminal||a.active||a.ready?a.reason:(a.ready_reason||a.reason))):'';
+  const waiting=available&&!a.active&&!a.ready&&a.state==='LOST_DATA'&&reason!==a.reason;
+  const recovered=available&&!a.active&&a.ready&&a.state==='LOST_DATA';
   document.getElementById('align-state').textContent=available&&a.preparing?
-    'Đang tắt YOLO và xác nhận các phép đo RGB + Depth mới…':available?
-    (states[a.state]||a.state)+' · '+(a.ready?a.reason:(a.ready_reason||a.reason)):
-    'Chạy scripts/open_pallet_alignment.sh để kết nối.';
+    'Đang chuẩn bị căn xe · '+(a.ready_reason||'Chờ YOLO tắt và phép đo RGB-D mới…'):available?
+    (recovered?'Sẵn sàng bắt đầu lại':waiting?'Chờ đủ dữ liệu để bắt đầu':(states[a.state]||a.state))+' · '+reason:
+    'Chạy scripts/open_pallet_alignment_real.sh để kết nối.';
+  // Replace the Start request's acceptance message with the live result.
+  // Otherwise a rejected route still appears to be planning indefinitely.
+  if(available&&!alignmentBusy)document.getElementById('align-result').textContent=reason;
   document.getElementById('align-standoff').textContent=available?a.standoff_m.toFixed(2)+' m':'1,20 m';
+  document.getElementById('align-distance-label').textContent=staging?'Dư khoảng cách so với tối thiểu':'Sai số khoảng cách';
+  document.getElementById('align-clearance').textContent=available&&Number.isFinite(a.fork_plane_distance_m)?a.fork_plane_distance_m.toFixed(3)+' m':'—';
   const e=available?a.errors:null;
   document.getElementById('align-distance').textContent=e?(e.distance_m*100).toFixed(1)+' cm':'—';
   document.getElementById('align-lateral').textContent=e?(e.lateral_m*100).toFixed(1)+' cm':'—';
@@ -152,6 +175,7 @@ function showVehicleAlignment(a){
   document.getElementById('align-start').textContent=available&&a.execute?'Bắt đầu căn xe':'Kiểm tra lệnh căn (xe đứng yên)';
   document.getElementById('align-start').disabled=alignmentBusy||!available||!a.ready||a.active;
   document.getElementById('align-stop').disabled=!available;
+  document.getElementById('align-stop').textContent=handling?'Dừng xe và càng':'Dừng căn xe';
 }
 async function setAlignment(enabled){
   if(enabled&&alignmentBusy)return;
@@ -159,7 +183,7 @@ async function setAlignment(enabled){
   document.getElementById('align-start').disabled=true;
   try{
     const r=await fetch('/alignment',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({enabled}),signal:AbortSignal.timeout(4500)});
+      body:JSON.stringify({enabled}),signal:AbortSignal.timeout(enabled?12000:4500)});
     const response=await r.json();
     document.getElementById('align-result').textContent=response.message;
   }catch(e){document.getElementById('align-result').textContent='Chưa có xác nhận; kiểm tra bộ căn xe.';}
@@ -237,8 +261,8 @@ function showAlignment(m){
   const status=document.getElementById('alignment-status');
   status.className=m ? (m.heading_correction_required?'alignment-needed':'alignment-ok') : '';
   status.textContent=!m ? 'Chưa có phép đo góc hợp lệ.' : m.heading_correction_required ?
-    'Hai mặt còn lệch từ 2° trở lên; hướng chỉnh dự kiến: '+(m.filtered_fork_alignment_deg>0?'trái':'phải')+'.' :
-    'Hai mặt gần song song (góc sau lọc < 2°). Vẫn kiểm tra lệch ngang Y.';
+    'Hai mặt còn lệch từ 1° trở lên; hướng chỉnh dự kiến: '+(m.filtered_fork_alignment_deg>0?'trái':'phải')+'.' :
+    'Hai mặt gần song song (góc sau lọc < 1°). Vẫn kiểm tra lệch ngang Y.';
 }
 function showCpu(cpu){
   const percent=v=>v==null?'—':v.toFixed(1)+'%';
@@ -474,6 +498,18 @@ def position_from_measurement(measured):
     }
 
 
+def alignment_display_reason(status):
+    """Show the current data gate after a past, already recovered data stop."""
+    if status.get('state')=='LOST_DATA' and not status.get('active') and status.get('ready'):
+        return 'Dữ liệu đã phục hồi; bấm Bắt đầu căn xe để bắt đầu lại'
+    if (not status.get('active') and not status.get('ready')
+            and not status.get('preparing')
+            and status.get('state') in ('LOST_DATA','BLOCKED')
+            and status.get('ready_reason')):
+        return status['ready_reason']
+    return status.get('reason','')
+
+
 class TargetWebSource:
     """Read the existing RGB+Depth target node and its annotated preview."""
 
@@ -598,7 +634,9 @@ class TargetWebSource:
             future = self.alignment_client.call_async(request)
             done = threading.Event()
             future.add_done_callback(lambda _: done.set())
-            if not done.wait(3.0):
+            # The aligner may need a complete clean five-second RGB-D window
+            # after a transient gap. Stop retains its short independent timeout.
+            if not done.wait(10.0 if enabled else 3.0):
                 # Cancel a potentially delayed start with an ordered stop on the same client.
                 if enabled:
                     stop = self.SetBool.Request(); stop.data = False
@@ -725,6 +763,7 @@ class TargetWebSource:
         fresh = self.alignment_status is not None and time.monotonic()-self.alignment_received_at < 1.0
         self.preview.status = {**self.preview.status, 'alignment': {
             **(self.alignment_status if fresh else {}),
+            **({'display_reason':alignment_display_reason(self.alignment_status)} if fresh else {}),
             'available': fresh and self.alignment_client.service_is_ready()}}
         enabled_fresh = time.monotonic() - self.enabled_received_at < 2.5
         phase_fresh = self.recognition_phase is not None and time.monotonic()-self.recognition_received_at < 1.0

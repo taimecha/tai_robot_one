@@ -22,6 +22,12 @@ def main():
             env = {**os.environ, 'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1',
                    'OMP_NUM_THREADS': '1', 'OMP_WAIT_POLICY': 'PASSIVE',
                    'GOMP_SPINCOUNT': '0'}
+            # Raw RGB and semantic seeds exceed FastDDS's default SHM segment.
+            # Use the same large-sample transport as the live camera processes.
+            profile = Path(__file__).resolve().parents[3]/'ros2_ws/config/camera_fastdds.xml'
+            if profile.is_file():
+                env.setdefault('FASTRTPS_DEFAULT_PROFILES_FILE',str(profile))
+                env.setdefault('FASTDDS_DEFAULT_PROFILES_FILE',str(profile))
             children.append(subprocess.Popen(
                 [sys.executable, str(Path(__file__).with_name(name)), *sys.argv[1:]],
                 start_new_session=True, env=env))

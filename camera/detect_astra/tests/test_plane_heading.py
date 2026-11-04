@@ -63,5 +63,23 @@ class PlaneHeadingTest(unittest.TestCase):
             with self.subTest(mode=mode),self.assertRaises(ValueError):
                 measure_pallet_target(mask,box,broken,intrinsics,heading_floor_reference=True)
 
+    def test_near_pallet_is_excluded_from_independent_floor_fit(self):
+        _,_,depth,intrinsics=self.scene()
+        depth[340:470,190:450]=1400
+        exclude=np.zeros_like(depth,bool);exclude[328:480,178:462]=True
+        slope,_=floor_depth_skew(depth,intrinsics,exclude)
+        self.assertAlmostEqual(slope,.0001,delta=2e-6)
+        depth[350:470,:]=0
+        with self.assertRaises(ValueError):floor_depth_skew(depth,intrinsics,exclude)
+
+    def test_another_object_in_floor_band_does_not_tilt_the_reference(self):
+        _,_,depth,intrinsics=self.scene()
+        depth[350:470,30:170]=1250
+        slope,quality=floor_depth_skew(depth,intrinsics)
+        self.assertAlmostEqual(slope,.0001,delta=2e-6)
+        self.assertLess(quality['heading_floor_mad_inv_m'],.006)
+        depth[350:470,:430]=1250
+        with self.assertRaises(ValueError):floor_depth_skew(depth,intrinsics)
+
 
 if __name__=='__main__':unittest.main()

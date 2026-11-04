@@ -1,0 +1,510 @@
+Panels:
+- Class: rviz_common/Displays
+  Help Height: 0
+  Name: Displays
+  Property Tree Widget:
+    Expanded:
+    - /Global Options1
+    - /TF1/Frames1
+    - /TF1/Tree1
+    - /Global Planner1
+    - /Global Planner1/Global Costmap1
+    - /Global Planner1/Downsampled Costmap1
+    - /Controller1
+    - /Controller1/Local Costmap1
+    Splitter Ratio: 0.5833333134651184
+  Tree Height: 287
+- Class: rviz_common/Selection
+  Name: Selection
+- Class: rviz_common/Tool Properties
+  Expanded:
+  - /Publish Point1
+  Name: Tool Properties
+  Splitter Ratio: 0.5886790156364441
+- Class: rviz_common/Views
+  Expanded:
+  - /Current View1
+  Name: Views
+  Splitter Ratio: 0.3333333432674408
+- Class: nav2_rviz_plugins/Navigation 2
+  Name: Navigation 2
+Visualization Manager:
+  Class: ''
+  Displays:
+  - Alpha: 0.5
+    Cell Size: 1
+    Class: rviz_default_plugins/Grid
+    Color: 160; 160; 164
+    Enabled: true
+    Line Style:
+      Line Width: 0.029999999329447746
+      Value: Lines
+    Name: Grid
+    Normal Cell Count: 0
+    Offset:
+      X: 0
+      Y: 0
+      Z: 0
+    Plane: XY
+    Plane Cell Count: 10
+    Reference Frame: <Fixed Frame>
+    Value: true
+  - Alpha: 1
+    Class: rviz_default_plugins/RobotModel
+    Collision Enabled: false
+    Description File: ''
+    Description Source: Topic
+    Description Topic:
+      Depth: 5
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /robot_description
+    Enabled: true
+    Links:
+      All Links Enabled: true
+      Expand Joint Details: false
+      Expand Link Details: false
+      Expand Tree: false
+      Link Tree Style: Links in Alphabetic Order
+      base_footprint:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+      base_link:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+      battery_pack:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      camera_link:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      camera_link_optical:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+      chassis:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      fork_carriage:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      front_left_bracket:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      front_left_motor:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      front_left_wheel:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      front_right_bracket:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      front_right_motor:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      front_right_wheel:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      imu_link:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      lidar_link:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      mast_frame:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      rear_left_bracket:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      rear_left_motor:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      rear_left_wheel:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      rear_right_bracket:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      rear_right_motor:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      rear_right_wheel:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+      sensor_mount_link:
+        Alpha: 1
+        Show Axes: false
+        Show Trail: false
+        Value: true
+    Mass Properties:
+      Inertia: false
+      Mass: false
+    Name: RobotModel
+    TF Prefix: ''
+    Update Interval: 0
+    Value: true
+    Visual Enabled: true
+  - Alpha: 1
+    Autocompute Intensity Bounds: true
+    Autocompute Value Bounds:
+      Max Value: 10
+      Min Value: -10
+      Value: true
+    Axis: Z
+    Channel Name: intensity
+    Class: rviz_default_plugins/LaserScan
+    Color: 255; 60; 60
+    Color Transformer: FlatColor
+    Decay Time: 0
+    Enabled: true
+    Invert Rainbow: false
+    Max Color: 255; 255; 255
+    Max Intensity: 1
+    Min Color: 0; 0; 0
+    Min Intensity: 1
+    Name: LiDAR physical obstacles
+    Position Transformer: XYZ
+    Selectable: true
+    Size (Pixels): 4
+    Size (m): 0.02
+    Style: Points
+    Topic:
+      Depth: 1
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /scan_filtered
+    Use Fixed Frame: true
+    Use rainbow: false
+    Value: true
+  - Alpha: 1
+    Autocompute Intensity Bounds: true
+    Autocompute Value Bounds:
+      Max Value: 10
+      Min Value: -10
+      Value: true
+    Axis: Z
+    Channel Name: intensity
+    Class: rviz_default_plugins/LaserScan
+    Color: 255; 180; 0
+    Color Transformer: FlatColor
+    Decay Time: 0
+    Enabled: true
+    Invert Rainbow: false
+    Max Color: 255; 255; 255
+    Max Intensity: 1
+    Min Color: 0; 0; 0
+    Min Intensity: 1
+    Name: RGB-D obstacles (height 6–75 cm)
+    Position Transformer: XYZ
+    Selectable: true
+    Size (Pixels): 4
+    Size (m): 0.02
+    Style: Points
+    Topic:
+      Depth: 1
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /camera/obstacle_scan
+    Use Fixed Frame: true
+    Use rainbow: false
+    Value: true
+  - Class: rviz_default_plugins/Map
+    Name: Saved map
+    Enabled: true
+    Value: true
+    Alpha: 0.45
+    Color Scheme: map
+    Draw Behind: true
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /map
+    Use Timestamp: false
+  - Class: rviz_default_plugins/Map
+    Name: Staging LiDAR costmap (inspection only)
+    Enabled: true
+    Value: true
+    Alpha: 0.65
+    Color Scheme: costmap
+    Draw Behind: true
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /pallet_view/global_costmap/costmap
+    Use Timestamp: false
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Physical body and forks (green)
+    Enabled: true
+    Value: true
+    Topic:
+      Depth: 1
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /pallet_view/markers
+  - Class: rviz_common/Group
+    Name: Nav2 global (enable during navigation)
+    Enabled: false
+    Displays:
+    - Class: rviz_default_plugins/Map
+      Name: Global costmap
+      Enabled: true
+      Value: true
+      Alpha: 0.6
+      Color Scheme: costmap
+      Draw Behind: true
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /global_costmap/costmap
+      Use Timestamp: false
+    - Class: rviz_default_plugins/Map
+      Name: Local costmap
+      Enabled: true
+      Value: true
+      Alpha: 0.7
+      Color Scheme: costmap
+      Draw Behind: true
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_costmap/costmap
+      Use Timestamp: false
+    - Class: rviz_default_plugins/Path
+      Name: Planned path
+      Enabled: true
+      Value: true
+      Alpha: 1
+      Color: 0; 255; 255
+      Line Style: Lines
+      Line Width: 0.03
+      Pose Style: None
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /plan
+    - Class: rviz_default_plugins/Path
+      Name: Local path
+      Enabled: true
+      Value: true
+      Alpha: 1
+      Color: 50; 255; 50
+      Line Style: Lines
+      Line Width: 0.03
+      Pose Style: None
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /local_plan
+  - Class: rviz_common/Group
+    Name: Pallet Nav2 (enable during alignment)
+    Enabled: false
+    Displays:
+    - Class: rviz_default_plugins/Map
+      Name: Global costmap
+      Enabled: true
+      Value: true
+      Alpha: 0.6
+      Color Scheme: costmap
+      Draw Behind: true
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /pallet_nav/global_costmap/costmap
+      Use Timestamp: false
+    - Class: rviz_default_plugins/Map
+      Name: Local costmap
+      Enabled: true
+      Value: true
+      Alpha: 0.7
+      Color Scheme: costmap
+      Draw Behind: true
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /pallet_nav/local_costmap/costmap
+      Use Timestamp: false
+    - Class: rviz_default_plugins/Path
+      Name: Planned path
+      Enabled: true
+      Value: true
+      Alpha: 1
+      Color: 0; 255; 255
+      Line Style: Lines
+      Line Width: 0.03
+      Pose Style: None
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pallet_nav/plan
+    - Class: rviz_default_plugins/Path
+      Name: Local path
+      Enabled: true
+      Value: true
+      Alpha: 1
+      Color: 50; 255; 50
+      Line Style: Lines
+      Line Width: 0.03
+      Pose Style: None
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pallet_nav/local_plan
+  - Class: rviz_default_plugins/PointCloud2
+    Name: RGB-D corrected cloud (includes floor; optional)
+    Enabled: false
+    Value: false
+    Alpha: 1
+    Color Transformer: AxisColor
+    Axis: Z
+    Position Transformer: XYZ
+    Style: Points
+    Size (Pixels): 2
+    Decay Time: 0
+    Topic:
+      Depth: 1
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Best Effort
+      Value: /camera/depth/points_nav_corrected
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 15
+  Name: root
+  Tools:
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/FocusCamera
+  - Class: rviz_default_plugins/Measure
+    Line color: 128; 128; 0
+  - Class: rviz_default_plugins/SetInitialPose
+    Covariance x: 0.25
+    Covariance y: 0.25
+    Covariance yaw: 0.06853891909122467
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /initialpose
+  - Class: rviz_default_plugins/PublishPoint
+    Single click: true
+    Topic:
+      Depth: 5
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /clicked_point
+  - Class: nav2_rviz_plugins/GoalTool
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Angle: 0.0
+      Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Scale: 150.0
+      Target Frame: base_footprint
+      Value: TopDownOrtho (rviz_default_plugins)
+      X: 0.0
+      Y: 0.0
+    Saved: null
+Window Geometry:
+  Displays:
+    collapsed: false
+  Docking:
+    collapsed: false
+  Height: 950
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Navigation 2:
+    collapsed: false
+  RealsenseCamera:
+    collapsed: false
+  Selection:
+    collapsed: false
+  Selector:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1600
+  X: 0
+  Y: 0

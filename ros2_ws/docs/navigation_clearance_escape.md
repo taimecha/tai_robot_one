@@ -1,3 +1,30 @@
+## Tight arrival arcs on the real base, 2026-11-01
+
+A completed recognition-goal action took 49.9 seconds for a selected 0.111 m
+Direct route. Its logs show one FollowPath attempt without replanning or
+recovery; the operator observed rotation together with forward movement.
+No command/odometry trace was captured during that action, so the logs alone
+cannot attribute all of its elapsed time to one controller state.
+
+An isolated replay of that start and goal reproduced an excessive approach
+command: 0.10 m/s with about 1.17 rad/s yaw. The real velocity smoother limits
+yaw to 0.40 rad/s and scales both axes, which can reduce translation below the
+loaded drivetrain's reliable approach floor. Within the last 15 cm, the
+controller now requests a fully checked stationary alignment when the endpoint
+curvature at approach speed would exceed its configured heading-turn rate.
+It uses the existing 0.04 rad heading threshold before handing translation
+back to RPP. Ordinary gentle approaches and final goal-yaw alignment retain
+their previous behavior. Collision checks and the 5 cm / 5 degree goal
+tolerances remain in force.
+
+The actual-controller regression covers mirrored 11 cm diagonal arrivals,
+the initial stationary turn, command angular bounds and complete arrival
+under ideal kinematics. This is isolated verification; elapsed real motion
+time still requires a new operator trial after restarting navigation.
+For a field trace, record `/cmd_vel_nav`, `/cmd_vel_smoothed`, `/cmd_vel_safe`,
+`/odom`, `/amcl_pose`, `/tf`, `/tf_static` and
+`/navigate_to_pose/_action/status` with `ros2 bag record` during that trial.
+
 ## Local fork-tip raster contact during retreat, 2026-10-02
 
 After several successful live goals, navigation to `(3.561430, 0.114829,

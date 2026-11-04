@@ -10,7 +10,7 @@ from pallet_messages import confirmed
 class RGBDTargetEstimator:
     def __init__(self, args):
         self.args = args
-        self.tracker = PalletRGBTracker()
+        self.tracker = PalletRGBTracker(getattr(args,'rgb_gap_recovery',False))
         self.history = deque(maxlen=args.confirm_frames)
         self.seed_stamp_ns = 0
         self.seed_class = ''
@@ -84,12 +84,20 @@ class RGBDTargetEstimator:
                 max_seed_ns = int(getattr(self.args, 'max_seed_age_ms', 1000.)*1e6)
                 if not 0 <= stamp_ns - seed['stamp_ns'] <= max_seed_ns:
                     raise ValueError('YOLO semantic seed outside acquisition age limit')
-                candidate = PalletRGBTracker()
+                candidate = PalletRGBTracker(getattr(self.args,'rgb_gap_recovery',False))
                 mask, bbox = candidate.seed(seed['rgb'], seed['mask'], seed['bbox'], seed['stamp_ns'])
-                for cached_stamp, cached_rgb in self.rgb_history:
-                    if (seed['stamp_ns'] < cached_stamp < stamp_ns
-                            and cached_stamp-candidate.stamp_ns >= 150_000_000):
-                        candidate.update(cached_rgb, cached_stamp)
+                # Bridge through the furthest cached frame within 400 ms,
+                # leaving margin below the unchanged 500-ms flow gap gate.
+                # Replaying every 150 ms needlessly delayed the CURRENT pose
+                # when inference and navigation shared the Pi CPU.
+                while stamp_ns-candidate.stamp_ns > 400_000_000:
+                    bridge = [(s,rgb) for s,rgb in self.rgb_history
+                              if candidate.stamp_ns < s < stamp_ns and
+                              s-candidate.stamp_ns <= 400_000_000]
+                    if not bridge:
+                        raise ValueError('RGB tracking gap exceeded 500 ms while bridging seed')
+                    cached_stamp,cached_rgb = bridge[-1]
+                    candidate.update(cached_rgb,cached_stamp)
                 if stamp_ns != seed['stamp_ns']:
                     mask, bbox = candidate.update(image, stamp_ns)
                 proposed = self.measure(mask, bbox, depth, intrinsics)
@@ -107,6 +115,8 @@ class RGBDTargetEstimator:
                 raise ValueError('LOST: enable YOLO to acquire pallet; ' +
                                  (self.last_seed_error or self.loss_reason))
             mask, bbox = self.track_rgb(image, stamp_ns)
+            if self.tracker.reverified:
+                self.history.clear()
             try:
                 measurement = self.measure(mask, bbox, depth, intrinsics)
             except ValueError as exc:

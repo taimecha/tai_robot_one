@@ -3,7 +3,7 @@
 import math
 
 
-HEADING_TOLERANCE_DEG = 2.0
+HEADING_TOLERANCE_DEG = 1.0
 
 
 class HeadingDisplayFilter:

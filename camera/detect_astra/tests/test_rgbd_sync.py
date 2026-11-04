@@ -20,6 +20,8 @@ class RGBDSyncTest(unittest.TestCase):
         rclpy.init()
         self.node = TargetNode(SimpleNamespace(max_age_ms=250, max_delta_ms=50))
         self.node.source_diagnostics = {'endpoints': {'rgb': [{}, {}]}}
+        self.node.get_clock = lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(nanoseconds=1_200_000_000))
 
     def tearDown(self):
         self.node.destroy_node()
@@ -72,3 +74,19 @@ class RGBDSyncTest(unittest.TestCase):
         intrinsics, reason = validate_intrinsics(pair[0], pair[1], pair[3], pair[5])
         self.assertIsNone(intrinsics)
         self.assertIn('within 50 ms', reason)
+
+    def test_late_callback_does_not_override_newer_capture_or_rewind_tracking(self):
+        for stamp in (1_000_000_000,1_100_000_000):
+            self.add_images(stamp)
+            self.node.receive_info('rgb',self.msg('info',stamp))
+        self.node.receive('depth',self.msg('depth',1_016_000_000))
+        pair=self.node.take_pair()
+        self.assertEqual(stamp_ns(pair[0]),1_100_000_000)
+        self.node.receive('rgb',self.msg('rgb',1_000_000_000))
+        self.assertIsNone(self.node.take_pair())
+
+    def test_recent_callback_with_old_capture_is_rejected(self):
+        self.add_images(900_000_000)
+        self.node.receive_info('rgb',self.msg('info',900_000_000))
+        self.assertIsNone(self.node.take_pair())
+        self.assertFalse(self.node.pending_images['rgb'])

@@ -32,11 +32,16 @@ def _leg_components(mask, bbox):
         count, labels, stats, _ = cv2.connectedComponentsWithStats(crop, 8)
         minimum_area = max(50, int(0.004 * (x2 - x1) * (y2 - y1)))
         minimum_height = max(8, int(0.25 * (y2 - start)))
+        # Under perspective, the far front foot ends higher in the image.
+        # Requiring both feet within eight pixels of the same bbox bottom
+        # rejected complete, high-confidence pallets viewed off centre.
+        # Both components must still reach the bottom fifth of the object.
+        bottom_margin=max(8,int(.20*(y2-y1)))
         candidates = []
         for index in range(1, count):
             cx, cy, cw, ch, area = map(int, stats[index])
             if (area >= minimum_area and cw >= 6 and ch >= minimum_height
-                    and cy + ch >= y2 - start - 8):
+                    and cy + ch >= y2 - start - bottom_margin):
                 candidates.append((index, cx, cy, cw, ch, area))
         candidates.sort(key=lambda item: item[-1], reverse=True)
         if len(candidates) != 2:
@@ -180,8 +185,15 @@ def measure_pallet_target(mask, bbox, depth_mm, intrinsics, *, pitch_deg=20.0,
     heading_diagnostics = {}
     if heading_floor_reference:
         from pallet_plane_heading import pallet_plane_heading
+        # As the pallet approaches, its front enters the bottom image band.
+        # It must not become part of the independent floor reference, including
+        # mixed depth edges and surfaces visible through its opening.
+        exclude=np.zeros_like(mask,dtype=bool)
+        x1,y1,x2,y2=map(int,bbox)
+        exclude[max(0,y1-12):min(mask.shape[0],y2+12),
+                max(0,x1-12):min(mask.shape[1],x2+12)]=True
         face_yaw,heading_diagnostics = pallet_plane_heading(
-            depth_mm,intrinsics,(left,right),pitch_rad,reference_u)
+            depth_mm,intrinsics,(left,right),pitch_rad,reference_u,exclude,rows)
 
     # Inner edges are obtained from the mask; use median leg depth instead of
     # boundary depth, which is often mixed with the background by registration.

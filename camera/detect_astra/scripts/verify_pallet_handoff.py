@@ -32,6 +32,7 @@ class HandoffVerifier(Node):
         super().__init__('verify_pallet_handoff')
         self.state = None
         self.state_at = 0.
+        self.last_target_at = 0.
         self.begin = None
         self.rows = []
         self.streams = {'rgb': [], 'depth': []}
@@ -63,6 +64,7 @@ class HandoffVerifier(Node):
         self.detections.append((time.monotonic(), stamp, bool(msg.valid)))
 
     def on_target(self, msg):
+        self.last_target_at = time.monotonic()
         if self.begin is None:
             self.wait_statuses['valid' if msg.valid else msg.status] += 1
             return
@@ -92,7 +94,8 @@ def main():
         while time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=.05)
             state = node.state
-            if (state and time.monotonic()-node.state_at < .5 and state.get('locked')
+            if (state and time.monotonic()-node.state_at < .5
+                    and time.monotonic()-node.last_target_at < .10 and state.get('locked')
                     and not state.get('enabled') and not state.get('busy')
                     and state.get('rgbd_health', {}).get('stable')):
                 break

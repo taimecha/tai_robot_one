@@ -96,3 +96,21 @@ def test_lift_frame_accepts_temporary_negative_homing_coordinate():
         'LIFT,1,2500,HOMING,0,-0.12000,0,-0.01000,0,0,NONE')
     assert frame['state'] == 'HOMING'
     assert frame['position'] == -0.12
+
+
+def test_stop_cancels_home_heartbeat_and_blocks_stale_set_targets():
+    """STOP must stop HOME as well as SET without sharing the serial port."""
+    parser = make_parser()
+    sent = []
+    parser.lift_home_active = True
+    parser.lift_home_seen_running = True
+    parser.lift_homed = True
+    parser.send_serial_line = lambda line: sent.append(line)
+    parser.log_throttled = lambda *args: None
+    parser.lift_stop_callback(None)
+    assert sent == ['LIFT,STOP']
+    assert not parser.lift_home_active
+    assert parser.lift_command_quiet_required
+    command = type('Command', (), {'data': [0.08]})()
+    parser.lift_command_callback(command)
+    assert sent == ['LIFT,STOP']

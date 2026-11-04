@@ -12,7 +12,7 @@ from launch.actions import (
     RegisterEventHandler,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import (
     PythonLaunchDescriptionSource,
@@ -120,6 +120,7 @@ def _nav2_actions(context, nav2_share, params_file):
         PythonLaunchDescriptionSource(
             os.path.join(nav2_share, 'launch', 'localization_launch.py')),
         launch_arguments={**common, 'map': map_file}.items(),
+        condition=IfCondition(LaunchConfiguration('start_localization')),
     )
     # RViz NavigateToPose uses these six servers. The generic Nav2 bringup
     # starts four more independent processes (smoother, route, waypoint and
@@ -197,6 +198,8 @@ def generate_launch_description():
             package_share, 'launch', 'real_hardware.launch.py')),
         launch_arguments={
             'use_lift': 'false',
+            'home_lift_on_activate': 'false',
+            'use_imu_visualizer': 'false',
             'use_rviz': 'false',
             'use_cm029_teleop': LaunchConfiguration('use_cm029_teleop'),
             'cmd_vel_input_topic': PythonExpression([
@@ -207,6 +210,7 @@ def generate_launch_description():
             'cm029_linear_speed': '0.20',
             'cm029_angular_speed': '0.40',
         }.items(),
+        condition=UnlessCondition(LaunchConfiguration('reuse_sensors')),
     )
 
     lidar = IncludeLaunchDescription(
@@ -216,11 +220,14 @@ def generate_launch_description():
             'serial_port': '/dev/tai_lidar',
             'frame_id': 'lidar_link',
         }.items(),
+        condition=UnlessCondition(LaunchConfiguration('reuse_sensors')),
     )
 
     scan_filter = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             package_share, 'launch', 'scan_self_filter.launch.py')),
+        launch_arguments={'max_scan_age_s':'0.40'}.items(),
+        condition=UnlessCondition(LaunchConfiguration('reuse_sensors')),
     )
 
     camera = IncludeLaunchDescription(
@@ -231,7 +238,10 @@ def generate_launch_description():
             'camera_cloud_pixel_stride':
                 LaunchConfiguration('camera_cloud_pixel_stride'),
         }.items(),
-        condition=IfCondition(LaunchConfiguration('use_camera')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('use_camera'), "'.lower() == 'true' and '",
+            LaunchConfiguration('reuse_sensors'), "'.lower() != 'true'",
+        ])),
     )
 
     nav_path_display_filter = Node(
@@ -247,6 +257,14 @@ def generate_launch_description():
             ]),
         }],
         condition=IfCondition(LaunchConfiguration('start_navigation')),
+    )
+
+    # Keep this display-only node with the sensors across control handoffs.
+    footprint_display = Node(
+        package='tai_robot_one', executable='rviz_footprint_display',
+        name='rviz_footprint_display', output='screen',
+        parameters=[{'use_sim_time': False}],
+        condition=UnlessCondition(LaunchConfiguration('reuse_sensors')),
     )
 
     nav2 = OpaqueFunction(
@@ -270,6 +288,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'start_navigation', default_value='false',
             description='Start Nav2 planning/control after AMCL'),
+        DeclareLaunchArgument('reuse_sensors', default_value='false',
+            description='Reuse running motors/lidar/camera during a stationary control handoff'),
+        DeclareLaunchArgument('start_localization', default_value='true',
+            description='Set false to retain the existing AMCL/map through a control handoff'),
         DeclareLaunchArgument(
             'navigation_autostart', default_value='true',
             description='Set false until AMCL has an initial pose'),
@@ -283,7 +305,7 @@ def generate_launch_description():
             'camera_scan_hz', default_value='15.0',
             description='Maximum published low-obstacle scan rate on the Pi'),
         DeclareLaunchArgument(
-            'camera_cloud_pixel_stride', default_value='2',
+            'camera_cloud_pixel_stride', default_value='3',
             description='Depth pixel spacing in the calibrated cloud'),
         DeclareLaunchArgument(
             'local_costmap_update_hz', default_value='10.0',
@@ -311,6 +333,7 @@ def generate_launch_description():
         lidar,
         scan_filter,
         camera,
+        footprint_display,
         nav_path_display_filter,
         TimerAction(
             period=LaunchConfiguration('localization_delay'),

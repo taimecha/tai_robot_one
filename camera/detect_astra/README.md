@@ -2,10 +2,20 @@
 
 Nhận diện và phân đoạn pallet cùng hàng hóa từ camera RGB Astra Pro bằng YOLO. Model mặc định là `models/best_v3.pt`, gồm ba lớp `Box`, `emty pallet` và `pallets`. Node `/pallet/target` chỉ chọn các lớp pallet để đo, bỏ qua lớp `Box`.
 
-**Giai đoạn hiện tại: kiểm chứng dữ liệu, chưa chạy căn xe thật.** Luồng mới:
+**Giai đoạn hiện tại: đã triển khai bộ căn Nav2 theo yêu cầu thử xe thật; người vận hành mở và bấm bắt đầu.** Luồng nhận diện:
 goal nhận diện thành công → YOLO xác nhận pallet → tắt YOLO → theo dõi RGB + Depth
 và đánh giá ổn định. Xem [PERCEPTION_HANDOFF.md](PERCEPTION_HANDOFF.md) để chạy.
-Chỉ triển khai/vận hành căn xe thật khi người dùng yêu cầu bước đó sau.
+Bộ căn chọn goal trung gian trên pháp tuyến pallet, giữ gốc càng cách mặt pallet ít nhất 1,20 m rồi sửa góc bằng RGB-D. Xem [ALIGNMENT.md](ALIGNMENT.md).
+
+**Lấy hàng bản mới (03-11):** dừng ngoài pallet để đo lại RGB-D, căn góc rồi chốt
+đường thẳng trong odometry; không dùng goal pickup bản đồ. Chu trình chờ kiểm tra
+thực tế trước khi nâng. Người vận hành đã xác nhận khoảng trống trong lỗ
+**rộng 25,5 cm × dài 35,5 cm × cao 10 cm**, giữa bốn trụ ở bốn góc hình chữ nhật;
+phía sau hở, các cặp trụ trước/sau thẳng hàng. Thêm `--auto-localize` để AMCL tự
+tìm lại pose trên bản đồ khi xe đứng yên, kiểm tra laser và hội tụ trước khi lấy hàng. Lệnh khởi động/chạy và phạm vi kiểm
+chứng tại [PICKUP.md](PICKUP.md), [CYCLE.md](CYCLE.md).
+
+Để làm với **pallet xanh = pallet 1** khi có cả pallet thường trong ảnh, thêm `--target-color green` vào lệnh nhận diện. Mặc định `any` xét tất cả pallet và sẽ từ chối chốt mục tiêu khi có hai pallet.
 
 **Góc giữa mặt trước xe và mặt pallet:** tùy chọn `--heading-floor-reference`
 ước lượng mặt phẳng pallet với tham chiếu sàn, giữ nguyên khoảng cách/X/Y.
@@ -98,7 +108,7 @@ bash scripts/open_pallet_target.sh --model data/runtime_models/best_v3_ncnn_mode
 
 Sau đó chạy `bash scripts/open_pallet_web.sh` trong terminal thứ ba và mở `http://localhost:8765` (chuyển tiếp cổng 8765 nếu dùng VS Code Remote SSH).
 
-### Bộ căn xe đã có — dành cho giai đoạn được yêu cầu sau
+### Bộ căn xe: Nav2 tới trục tiếp cận rồi sửa góc
 
 Giữ camera, nhận diện và web đang chạy. Trong terminal thứ tư, dùng:
 
@@ -107,7 +117,7 @@ cd /home/admin/tai_robot_one/tai_robot_one_community/camera/detect_astra
 bash scripts/open_pallet_alignment_real.sh
 ```
 
-Lệnh này mở bánh xe, IMU/EKF, lidar, lớp tránh vật cản và bộ căn CHẠY THẬT; xe chờ bấm **Bắt đầu căn xe** trên web. Điểm dừng tính từ gốc càng tới mặt pallet là **1,20 m**, lệch ngang dưới **2 cm**, góc dưới **2°**. Dừng bộ căn `DRY RUN` cũ bằng Ctrl+C trước khi mở. Hướng dẫn đầy đủ: [ALIGNMENT.md](ALIGNMENT.md).
+Lệnh này mở bánh xe, IMU/EKF, lidar, lớp tránh vật cản và bộ căn CHẠY THẬT; xe chờ bấm **Bắt đầu căn xe** trên web. Goal gần nhất trên pháp tuyến qua tâm lỗ, khoảng cách từ mặt pallet tới gốc càng **tối thiểu 1,20 m** (goal chừa thêm 10 cm), lệch ngang dưới **2 cm**, góc dưới **2°**. Dừng bộ căn `DRY RUN` cũ bằng Ctrl+C trước khi mở. Hướng dẫn đầy đủ: [ALIGNMENT.md](ALIGNMENT.md).
 
 ### Bật nhận diện theo giai đoạn để dành CPU cho điều hướng
 

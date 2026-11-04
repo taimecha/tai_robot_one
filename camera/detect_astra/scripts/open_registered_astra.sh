@@ -7,6 +7,17 @@ astra_overlay=${ASTRA_OVERLAY:-$project_dir/../../ros2_ws/install}
 source "$astra_overlay/setup.bash"
 set -u
 
+# Match the validated real-navigation camera transport and stream rates.
+# Default Astra launch uses RGB 30 Hz and a 512-KiB DDS SHM segment, which
+# cannot hold one uncompressed 640x480 RGB frame (921600 bytes).
+camera_transport="$project_dir/../../ros2_ws/config/camera_fastdds.xml"
+if [[ ! -r "$camera_transport" ]]; then
+  echo "Thiếu cấu hình truyền RGB-D: $camera_transport" >&2
+  exit 1
+fi
+export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-$camera_transport}"
+export FASTDDS_DEFAULT_PROFILES_FILE="${FASTDDS_DEFAULT_PROFILES_FILE:-$FASTRTPS_DEFAULT_PROFILES_FILE}"
+
 rgb_calibration_file="$project_dir/config/calibration/astra_pro_rgb_640x480_2026-10-11.yaml"
 if [[ ! -r "$rgb_calibration_file" ]]; then
   echo "Không đọc được file hiệu chuẩn RGB: $rgb_calibration_file" >&2
@@ -35,6 +46,9 @@ exec ros2 launch astra_camera astra_pro.launch.xml \
   depth_registration:=true \
   enable_color:=true \
   enable_ir:=false \
+  color_width:=640 color_height:=480 color_fps:=15 \
+  depth_width:=640 depth_height:=480 depth_fps:=30 \
+  tf_publish_rate:=0.0 \
   use_uvc_camera:=true \
   enable_point_cloud:="${ASTRA_POINT_CLOUD:-true}" \
   enable_colored_point_cloud:=false \

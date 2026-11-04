@@ -23,6 +23,8 @@ TEST(RearGoalController, ReversesWithoutHalfTurnStopsAtToleranceAndChecksRearCol
   node->declare_parameter("FollowPath.desired_linear_vel", .28);
   node->declare_parameter("FollowPath.approach_velocity_scaling_dist", .30);
   node->declare_parameter("FollowPath.min_approach_linear_velocity", .10);
+  node->declare_parameter("FollowPath.rotate_to_heading_angular_vel", .35);
+  node->declare_parameter("FollowPath.max_angular_accel", .6);
   tai_robot_one::SafeRotationRPP controller;
   controller.configure(node, "FollowPath", tf, map);
   controller.activate();
@@ -141,6 +143,59 @@ TEST(RearGoalController, ReversesWithoutHalfTurnStopsAtToleranceAndChecksRearCol
   update(2, 2, -.60);
   command = controller.computeVelocityCommands(pose, velocity, nullptr);
   EXPECT_LT(command.twist.angular.z, 0);
+  map->getCostmap()->setCost(mx, my, nav2_costmap_2d::FREE_SPACE);
+  // A roughly 11 cm diagonal arrival used to request >1 rad/s while driving
+  // at 0.10 m/s. The real smoother caps yaw at 0.40 and scales translation
+  // below the drivetrain's reliable floor. Check both steering directions,
+  // including the complete ideal kinematic arrival and final yaw alignment.
+  for (const double side : {-1.0, 1.0}) {
+    const double gx = 2.09, gy = 2.0 + side * .07;
+    const double goal_yaw = -side * tai_robot_one::kPi / 2;
+    const double heading = std::atan2(gy - 2.0, gx - 2.0);
+    nav_msgs::msg::Path diagonal;
+    diagonal.header.frame_id = "map";
+    auto append = [&](double x, double y, double yaw) {
+        geometry_msgs::msg::PoseStamped point;
+        point.header = diagonal.header;
+        point.pose.position.x = x; point.pose.position.y = y;
+        point.pose.orientation.z = std::sin(yaw / 2);
+        point.pose.orientation.w = std::cos(yaw / 2);
+        diagonal.poses.push_back(point);
+      };
+    append(2, 2, 0);
+    append(2, 2, heading);
+    for (int i = 1; i <= 5; ++i) {
+      append(2 + (gx - 2) * i / 5, 2 + (gy - 2) * i / 5, heading);
+    }
+    append(gx, gy, goal_yaw);
+    update(2, 2, 0);
+    controller.setPlan(diagonal);
+    velocity = geometry_msgs::msg::Twist{};
+    command = controller.computeVelocityCommands(pose, velocity, nullptr);
+    EXPECT_DOUBLE_EQ(command.twist.linear.x, 0);
+    EXPECT_GT(side * command.twist.angular.z, 0);
+    double x = 2, y = 2, yaw = 0, travel = 0;
+    bool arrived = false;
+    for (int tick = 0; tick < 400; ++tick) {
+      if (std::hypot(gx - x, gy - y) < .05 &&
+        std::abs(tai_robot_one::wrapAngle(goal_yaw - yaw)) < .0872664626)
+      {
+        arrived = true;
+        break;
+      }
+      update(x, y, yaw);
+      command = controller.computeVelocityCommands(pose, velocity, nullptr);
+      ASSERT_LE(std::abs(command.twist.angular.z), .35 + 1e-6);
+      velocity = command.twist;
+      constexpr double dt = .05;
+      x += velocity.linear.x * std::cos(yaw) * dt;
+      y += velocity.linear.x * std::sin(yaw) * dt;
+      yaw = tai_robot_one::wrapAngle(yaw + velocity.angular.z * dt);
+      travel += std::abs(velocity.linear.x) * dt;
+    }
+    EXPECT_TRUE(arrived);
+    EXPECT_LE(travel, .15);
+  }
   controller.deactivate(); controller.cleanup();
   map->on_cleanup(rclcpp_lifecycle::State());
   map.reset(); node.reset(); tf.reset();

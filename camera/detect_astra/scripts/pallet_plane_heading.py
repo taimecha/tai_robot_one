@@ -30,10 +30,35 @@ def _rays(u,v,intrinsics):
                                k,distortion).reshape(-1,2)
 
 
-def floor_depth_skew(depth,intrinsics):
+def _visible_floor(matrix,values,u,v,fx):
+    """Separate a broad majority floor from other objects in the floor band."""
+    rng=np.random.default_rng(0)
+    indices=rng.integers(0,len(values),size=(192,3))
+    triples=matrix[indices]
+    usable=abs(np.linalg.det(triples))>1e-5
+    coeff=np.linalg.solve(triples[usable],values[indices[usable],None])[...,0]
+    coeff=coeff[(coeff[:,1]>.2)&(abs(coeff[:,0]/fx)<.0005)]
+    if not len(coeff):raise ValueError('Heading unavailable: no broad visible floor plane')
+    residual=abs(values[:,None]-matrix@coeff.T)
+    inliers=residual<=.006
+    counts=inliers.sum(axis=0)
+    # Object surfaces cannot supply the reference: the floor must be a
+    # majority, have at least 500 measured points and span both image axes.
+    for j in np.argsort(counts)[::-1]:
+        keep=inliers[:,j]
+        if counts[j]<max(500,.55*len(values)):break
+        if np.ptp(u[keep])>=400 and np.ptp(v[keep])>=80:return keep
+    raise ValueError('Heading unavailable: floor is occluded or not spatially supported')
+
+
+def floor_depth_skew(depth,intrinsics,exclude_mask=None):
     if depth.shape != (480,640):
         raise ValueError('Heading floor reference requires calibrated 640x480 depth')
     v,u = np.mgrid[350:470:6,30:610:6]
+    if exclude_mask is not None:
+        if exclude_mask.shape!=depth.shape:raise ValueError('Floor exclusion mask shape mismatch')
+        eligible=~exclude_mask[v,u].astype(bool)
+        u,v=u[eligible],v[eligible]
     z = depth[v,u].astype(float)*.001
     valid = (z>.65)&(z<3.5)
     if valid.sum()<500 or valid.mean()<.65:
@@ -43,6 +68,14 @@ def floor_depth_skew(depth,intrinsics):
     fx = float(intrinsics[0][0,0])
     matrix = np.column_stack(((u-320.)/fx,rays[:,1],np.ones(len(z))))
     coeff,residual = _robust_fit(matrix,1/z)
+    # The bottom band can contain a second pallet as well as the target.
+    # Segment a spatially broad floor instead of fitting those object depths
+    # into the reference. Residual/coverage gates below still apply to floor.
+    initial_mad=float(np.median(abs(residual-np.median(residual))))
+    if initial_mad>.006 or np.mean(abs(residual)<=max(.006,3*initial_mad))<.8:
+        keep=_visible_floor(matrix,1/z,u,v,fx)
+        matrix,z,u,v=matrix[keep],z[keep],u[keep],v[keep]
+        coeff,residual=_robust_fit(matrix,1/z)
     slope = float(coeff[0]/fx)
     mad = float(np.median(abs(residual-np.median(residual))))
     inliers = abs(residual)<=max(.006,3*mad)
@@ -52,12 +85,14 @@ def floor_depth_skew(depth,intrinsics):
     return slope,dict(heading_floor_samples=int(len(z)),heading_floor_mad_inv_m=mad)
 
 
-def pallet_plane_heading(depth,intrinsics,components,pitch_rad,reference_u=370.):
+def pallet_plane_heading(depth,intrinsics,components,pitch_rad,reference_u=370.,exclude_mask=None,sample_rows=None):
     # The independent horizontal floor removes per-frame depth X skew. Zero
     # camera roll is a prerequisite, not inferred from the pallet's angle.
-    slope,diagnostics = floor_depth_skew(depth,intrinsics)
+    slope,diagnostics = floor_depth_skew(depth,intrinsics,exclude_mask)
     top = max(c['top'] for c in components)+2
     bottom = min(c['bottom'] for c in components)-2
+    if sample_rows is not None:
+        top=max(top,sample_rows[0]);bottom=min(bottom,sample_rows[1])
     points=[];labels=[]
     for index,c in enumerate(components):
         u,v = c['u'],c['v']

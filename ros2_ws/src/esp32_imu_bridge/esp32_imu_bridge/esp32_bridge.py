@@ -68,6 +68,8 @@ class ESP32ImuBridge(Node):
         )
         self.lift_home_subscription = self.create_subscription(
             Empty, '/lift/home', self.lift_home_callback, 10)
+        self.lift_stop_subscription = self.create_subscription(
+            Empty, '/lift/stop', self.lift_stop_callback, 10)
         self.serial_port = None
         self.receive_buffer = bytearray()
         self.last_connect_attempt = 0.0
@@ -191,6 +193,14 @@ class ESP32ImuBridge(Node):
                 'warning', 'Ignoring stale lift target until publisher goes quiet')
             return
         self.send_serial_line(f'LIFT,SET,{target:.5f}')
+
+    def lift_stop_callback(self, _message):
+        """Stop SET or HOME and require a quiet interval before a new target."""
+        self.lift_home_active = False
+        self.lift_home_seen_running = False
+        self.lift_command_quiet_required = True
+        self.last_lift_command_received = time.monotonic()
+        self.send_serial_line('LIFT,STOP')
 
     def publish_lift_status(self, **values):
         """Publish machine-readable state for teleop without a custom message."""

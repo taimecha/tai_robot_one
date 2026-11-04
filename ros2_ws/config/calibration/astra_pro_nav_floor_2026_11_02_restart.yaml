@@ -1,0 +1,18 @@
+# Height-only correction measured after cold restart, stationary robot.
+# Verified RGB floor ROI excludes pallet, rack and chair; 20 frames split 10/10.
+# Independent residual height: 99th percentile 0.92 cm, maximum 1.48 cm.
+# X/Y, inverse-depth correction, TF and 6-cm obstacle gate are unchanged.
+/spatial_depth_cloud:
+  ros__parameters:
+    pixel_stride: 3
+    max_rate_hz: 15.0
+    inverse_depth_x_slope: 7.019419557841291e-05
+    reference_u: 370.0
+    output_topic: /camera/depth/points_nav_corrected
+    floor_height_correction_enabled: true
+    floor_surface_tracking_enabled: true
+    height_reference_frame: base_footprint
+    floor_plane_coefficients:
+    - -0.0595948124144625
+    - 0.012612857822991666
+    - 0.04025360249077256

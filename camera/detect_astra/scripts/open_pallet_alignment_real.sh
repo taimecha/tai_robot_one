@@ -3,9 +3,10 @@
 set -eo pipefail
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source /opt/ros/jazzy/setup.bash
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
   echo 'Usage: bash scripts/open_pallet_alignment_real.sh [ROS launch arguments]'
-  echo 'Mở bánh xe, IMU/EKF, lidar, tránh vật cản và bộ căn CHẠY THẬT.'
+  echo 'Mở bánh xe, IMU/EKF, lidar, tránh vật cản, bộ căn và bước đưa càng/nâng theo lệnh riêng.'
   echo 'Sau khi mở, xe chờ bấm Bắt đầu căn xe trên web.'
   exit 0
 fi
@@ -13,7 +14,7 @@ fi
 python3 - <<'PY'
 from pathlib import Path
 import sys
-names={'align_pallet.py','ros2_control_node','sllidar_node','cmd_vel_stamper','ekf_node',
+names={'align_pallet.py','stage_pallet.py','handle_pallet.py','planner_server','controller_server','bt_navigator','ros2_control_node','sllidar_node','cmd_vel_stamper','ekf_node',
        'collision_monitor','esp32_bridge.py','esp32_imu_bridge'}
 found=[]
 for entry in Path('/proc').iterdir():

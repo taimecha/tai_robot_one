@@ -34,9 +34,9 @@ class HeadingFilterTest(unittest.TestCase):
         self.assertIsNone(filter_.angle_deg)
 
     def test_orientation_tolerance_keeps_small_nonzero_angles(self):
-        for angle in (-1.999, -1.4, 0, 1.4, 1.999):
+        for angle in (-.999, -.4, 0, .4, .999):
             filter_ = HeadingDisplayFilter()
             self.assertEqual(filter_.update(angle, 1), angle)
             self.assertFalse(heading_correction_required(angle))
-        for angle in (-8.6, -2, 2, 8.6):
+        for angle in (-8.6, -1, 1, 8.6):
             self.assertTrue(heading_correction_required(angle))

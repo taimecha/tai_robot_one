@@ -1,0 +1,21 @@
+# 1.20 m is a MINIMUM perpendicular pallet-face → fork-root distance.
+standoff_m: 1.20
+clearance_margin_m: 0.10
+chassis_front_m: 0.3005
+fork_root_m: 0.3655
+lateral_tolerance_m: 0.015
+# Initial lateral pass + remaining yaw error selects yaw-only correction.
+# Recheck lateral after turning; YAW_CORRECTED never authorizes insertion.
+heading_tolerance_deg: 2.0
+initial_clearance_margin_m: 0.22
+settle_s: 0.8
+max_linear_mps: 0.10
+max_angular_rps: 0.22
+min_turn_rps: 0.22
+max_duration_s: 180.0
+nav_timeout_s: 60.0
+candidate_step_m: 0.10
+candidate_extra_m: 0.80
+max_goal_travel_m: 2.0
+max_pallet_range_m: 3.0
+max_corrections: 2

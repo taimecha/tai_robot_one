@@ -133,6 +133,26 @@ class AlignmentRosTest(unittest.TestCase):
         self.assertEqual(self.commands[-1], (0., 0.))
         self.assertFalse(self.status['active'])
 
+    def test_camera_invalidates_after_start_waiter_then_reconfirms_without_second_request(self):
+        class InterruptedStart(PalletAlignmentNode):
+            injected = False
+            def tick(node):
+                pending = node.start_waiter
+                super().tick()
+                if (pending is not None and pending[0].done() and node.preparing
+                        and not node.injected):
+                    node.injected = True
+                    node.core.invalidate_target('synthetic frame lost just before coroutine resumes')
+        self.alignment = InterruptedStart(execute=False)
+        self.executor.add_node(self.alignment)
+        self.extra.append(self.alignment)
+        self.spin_until(lambda: self.client.service_is_ready() and self.status and self.status['ready'])
+        response = self.service(True)
+        self.assertTrue(self.alignment.injected)
+        self.assertTrue(response.success, response.message)
+        self.assertEqual(self.prepare_calls, 1)
+        self.assertGreaterEqual(self.alignment.core.confirmed, 3)
+
     def test_invalid_frame_stops_immediately_and_requires_new_confirmation(self):
         self.start_node()
         self.spin_until(lambda: self.status['ready'])
@@ -215,6 +235,22 @@ class AlignmentRosTest(unittest.TestCase):
         self.assertFalse(self.alignment.core.active)
         self.assertIsNone(self.alignment.core.target)
         self.assertEqual((self.alignment.core.v, self.alignment.core.w), (0., 0.))
+
+    def test_stale_odometry_disarms_then_recovers_without_starting_motion(self):
+        self.start_node()
+        self.spin_until(lambda:self.status['ready'])
+        self.assertTrue(self.service(True).success)
+        msg=Odometry();msg.header.stamp=self.node.get_clock().now().to_msg()
+        msg.header.stamp.sec-=1
+        msg.header.frame_id='odom';msg.child_frame_id='base_footprint'
+        msg.pose.pose.orientation.w=1.
+        self.alignment.on_odom(msg)
+        self.assertEqual(self.alignment.core.state,'LOST_DATA')
+        self.assertIn('thời gian',self.alignment.core.reason)
+        self.assertFalse(self.alignment.core.active)
+        self.spin_until(lambda:self.status['ready'] and self.alignment.core.confirmed>=3)
+        self.assertFalse(self.alignment.core.active)
+        self.assertEqual((self.alignment.core.v,self.alignment.core.w),(0.,0.))
 
     def test_start_turns_yolo_off_then_waits_for_new_measurements(self):
         self.start_node()

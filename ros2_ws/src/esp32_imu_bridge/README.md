@@ -16,10 +16,15 @@ Node hiểu protocol `IMU,1,...` của project `bno055_imu_monitor` và vẫn đ
 `angular_velocity_covariance[0] = -1`, tránh báo sai rằng tốc độ góc bằng zero
 có độ tin cậy tuyệt đối.
 
-Không chạy node này trên `/dev/tai_drive` hoặc `/dev/tai_lift`: backend
-`ros2_control` giữ độc quyền hai cổng đó. Trong kiến trúc robot hai ESP32 hiện
-tại, package này là công cụ bench/legacy và chưa được bật trong
-`real_hardware.launch.py`.
+Không chạy node này trên `/dev/tai_drive` hoặc `/dev/tai_lift`. Với firmware
+IMU/lift kết hợp hiện tại, `real_hardware.launch.py` mở bridge trên `/dev/tai_imu`;
+bridge giữ độc quyền cổng đó và quản lý cả IMU lẫn càng. Không mở thêm một bridge.
+
+Càng dùng `/lift/home` (`Empty`), `/lift_controller/commands`
+(`Float64MultiArray`, một giá trị hành trình mét từ HOME) và `/lift/stop`
+(`Empty`). STOP gửi `LIFT,STOP`, tắt heartbeat HOME và chặn publisher SET cũ
+cho tới khi đã im 400 ms. SET cần nguồn lệnh liên tục; watchdog firmware dừng
+sau 350 ms. Phản hồi `/lift/status` là JSON từ MCU; không phải cảm biến tải.
 
 Do repository hiện tại đã là package `tai_robot_one`, `colcon` không khám phá
 package Python nằm lồng bên dưới. `CMakeLists.txt` của `tai_robot_one` vì vậy

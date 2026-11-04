@@ -1,0 +1,37 @@
+# Final supervised approach after ALIGNED. Heights are lift travel from HOME.
+# Operator measured opening ceiling: 0.10 m; fork top at HOME: 0.073 m.
+insertion:
+  opening_top_m: 0.100
+  opening_bottom_m: 0.0
+  # Base settings only. Final root stop/minimum are computed from measured
+  # open rear clearance, fork corners and longitudinal stop tolerance.
+  root_stop_m: 0.020
+  minimum_root_gap_m: 0.010
+  longitudinal_tolerance_m: 0.005
+  lateral_tolerance_m: 0.015
+  heading_tolerance_rad: 0.03490658503988659
+  maximum_speed_mps: 0.10
+  maximum_goal_correction_m: 0.150
+lift_raise_m: 0.080
+settle_s: 0.8
+insertion_timeout_s: 35.0
+lift_timeout_s: 25.0
+operator_timeout_s: 0.6
+
+# Four posts at rectangle corners; each front post aligns with its rear post.
+# No rear crossbar/wall. The clear corridor is W25.5 x L35.5 x H10 cm.
+# The separate 30 cm extends OUTSIDE, behind the pallet's rear face.
+# Width is a ceiling on the live RGB-D opening width; it cannot widen it.
+usable_width_m: 0.255
+usable_depth_m: 0.355
+rear_clearance_m: 0.300
+# Reserve before the OUTSIDE obstacle, not before the rear pair of posts.
+rear_margin_m: 0.020
+checkpoint_root_gap_m: 1.20
+remeasure_s: 5.0
+remeasure_timeout_s: 20.0
+final_heading_tolerance_rad: 0.008726646259971648
+final_tracking_tolerance_m: 0.005
+
+# Lateral correction outside pallet: pivot, translate sideways, pivot back.
+quarter_turn_lateral: false

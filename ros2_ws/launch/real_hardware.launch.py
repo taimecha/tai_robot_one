@@ -122,6 +122,7 @@ def generate_launch_description():
         package='tai_robot_one',
         executable='imu_visualizer',
         name='imu_visualizer',
+        condition=IfCondition(LaunchConfiguration('use_imu_visualizer')),
         output='screen',
         # RViz attitude markers are diagnostic only; 5 Hz keeps them readable
         # without spending a Python process on 20 marker arrays each second.
@@ -240,6 +241,7 @@ def generate_launch_description():
             'home_lift_on_activate',
             default_value='true',
             description='Home the lift automatically before arming it'),
+        DeclareLaunchArgument('use_imu_visualizer', default_value='true'),
         DeclareLaunchArgument(
             'use_rviz',
             default_value='false',

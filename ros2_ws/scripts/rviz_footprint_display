@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Display the active costmap footprint on live TF; never publish control data.
+
+Costmap polygons are world-frame snapshots. RViz Polygon retains its final
+snapshot when Nav2 stops, so it can disagree with the live RobotModel during
+the switch to pallet alignment. Convert fresh snapshots back to the body
+frame at their original time, then use a frame-locked, expiring RViz marker.
+The actual costmap/Collision Monitor topics and geometry are untouched.
+"""
+import math
+import time
+
+import rclpy
+from geometry_msgs.msg import Point, PolygonStamped
+from rclpy.duration import Duration
+from rclpy.node import Node
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener, TransformException
+from visualization_msgs.msg import Marker
+
+MAX_AGE_S = .8
+SOURCES = ('/local_costmap/published_footprint',
+           '/pallet_nav/local_costmap/published_footprint')
+
+
+def body_marker(message, transform):
+    """Use the full rigid transform, including loaded/padded polygon geometry."""
+    q = transform.transform.rotation
+    norm = math.sqrt(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w)
+    if not math.isfinite(norm) or norm < 1e-6:
+        raise ValueError('Invalid transform rotation')
+    x,y,z,w = (q.x/norm,q.y/norm,q.z/norm,q.w/norm)
+    rotation = ((1-2*(y*y+z*z),2*(x*y-z*w),2*(x*z+y*w)),
+                (2*(x*y+z*w),1-2*(x*x+z*z),2*(y*z-x*w)),
+                (2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)))
+    t = transform.transform.translation
+    points = []
+    if len(message.polygon.points) < 3:
+        raise ValueError('Empty footprint')
+    for p in message.polygon.points:
+        v = (p.x,p.y,p.z)
+        values = [sum(row[i]*v[i] for i in range(3))+offset
+                  for row,offset in zip(rotation,(t.x,t.y,t.z))]
+        if not all(math.isfinite(a) for a in values):
+            raise ValueError('Nonfinite footprint')
+        points.append(Point(x=values[0],y=values[1],z=values[2]+.03))
+    marker = Marker()
+    marker.header.frame_id = 'base_footprint'
+    # Zero time + frame_locked makes RViz follow the current RobotModel TF.
+    marker.ns = 'active_costmap_footprint'
+    marker.id = 0
+    marker.type = Marker.LINE_STRIP
+    marker.action = Marker.ADD
+    marker.pose.orientation.w = 1.
+    marker.scale.x = .012
+    marker.color.g = 1.
+    marker.color.a = 1.
+    marker.frame_locked = True
+    marker.lifetime = Duration(seconds=MAX_AGE_S).to_msg()
+    marker.points = points+[points[0]]
+    return marker
+
+
+class FootprintDisplay(Node):
+    def __init__(self):
+        super().__init__('rviz_footprint_display')
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer,self)
+        self.publisher = self.create_publisher(Marker,'/rviz/robot_footprint',10)
+        self.pending = None
+        for topic in SOURCES:
+            self.create_subscription(PolygonStamped,topic,self.receive,10)
+        self.create_timer(.05,self.publish_pending)
+
+    def receive(self,message):
+        self.pending = (message,time.monotonic())
+
+    def publish_pending(self):
+        if self.pending is None:
+            return
+        message,received = self.pending
+        stamp = Time.from_msg(message.header.stamp)
+        age = (self.get_clock().now()-stamp).nanoseconds/1e9
+        if (not message.header.frame_id or stamp.nanoseconds == 0
+                or not -.05 <= age <= MAX_AGE_S
+                or time.monotonic()-received > MAX_AGE_S):
+            self.pending = None
+            return
+        try:
+            transform = self.buffer.lookup_transform(
+                'base_footprint',message.header.frame_id,stamp)
+            marker = body_marker(message,transform)
+        except TransformException:
+            # Wait briefly for that exact sensor/TF time; do not use stale TF.
+            return
+        except ValueError:
+            self.pending = None
+            return
+        # Lifetime only covers the remaining freshness of this measurement.
+        marker.lifetime = Duration(seconds=max(.001,MAX_AGE_S-max(0.,age))).to_msg()
+        self.publisher.publish(marker)
+        self.pending = None
+
+
+def main():
+    rclpy.init()
+    node = FootprintDisplay()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

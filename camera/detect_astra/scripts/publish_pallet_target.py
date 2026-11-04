@@ -29,6 +29,7 @@ from astra_rgbd_stream import (CameraReceiver, OPTICAL_FRAME, SHAPE, decode_imag
 from pallet_perception_config import parse_args
 from pallet_rgbd_estimator import RGBDTargetEstimator
 from pallet_messages import empty_message
+from pallet_semantic_search import MIN_SEMANTIC_CONFIDENCE
 
 
 class TargetNode(CameraReceiver):
@@ -42,6 +43,7 @@ class TargetNode(CameraReceiver):
         self.recognition_start_ns = 0
         self.recognition_reset_pending = False
         self.info_wait_started_at = None
+        self.last_pair_rgb_stamp_ns = 0
         self.publisher = self.create_publisher(PalletTarget, '/pallet/target', 1)
         self.preview_publisher = self.create_publisher(
             CompressedImage, '/pallet/preview/compressed',
@@ -73,7 +75,8 @@ class TargetNode(CameraReceiver):
             return reset
 
     def on_seed(self, msg):
-        if msg.valid and stamp_ns(msg) > max(self.last_seed_stamp_ns, self.recognition_start_ns):
+        if (msg.valid and MIN_SEMANTIC_CONFIDENCE <= msg.confidence <= 1.0 and
+                stamp_ns(msg) > max(self.last_seed_stamp_ns, self.recognition_start_ns)):
             with self.lock:
                 self.pending_seed = msg
                 self.last_seed_stamp_ns = stamp_ns(msg)
@@ -117,10 +120,12 @@ class TargetNode(CameraReceiver):
         """Prefer a complete RGB/Depth/CameraInfo set, allowing callback skew."""
         with self.lock:
             now = time.monotonic()
+            ros_now = self.get_clock().now().nanoseconds
             max_age = self.args.max_age_ms * 0.001
             for stream in ('rgb', 'depth'):
                 queue = self.pending_images[stream]
-                while queue and now - queue[0][1] > max_age:
+                while queue and (now-queue[0][1] > max_age or
+                        not -50_000_000 <= ros_now-stamp_ns(queue[0][0]) <= max_age*1e9):
                     queue.popleft()
             while self.pending_color_info and now - self.pending_color_info[0][1] > 1.0:
                 self.pending_color_info.popleft()
@@ -130,7 +135,7 @@ class TargetNode(CameraReceiver):
             candidates = []
             complete = []
             for ri, (rgb, rt) in enumerate(rgb_queue):
-                if not stamp_ns(rgb):
+                if stamp_ns(rgb) <= self.last_pair_rgb_stamp_ns:
                     continue
                 for di, (depth, dt) in enumerate(depth_queue):
                     delta_ms = (stamp_ns(depth) - stamp_ns(rgb)) / 1e6
@@ -138,7 +143,9 @@ class TargetNode(CameraReceiver):
                         info = min(self.pending_color_info,
                                    key=lambda entry: abs(stamp_ns(entry[0])-stamp_ns(rgb)))[0] \
                             if self.pending_color_info else self.infos.get('rgb')
-                        candidate = (max(rt, dt), -abs(delta_ms), ri, di, delta_ms, info)
+                        # A late callback is not a newer photograph. Pick by
+                        # capture timestamp, then the closest Depth stamp.
+                        candidate = (stamp_ns(rgb), -abs(delta_ms), ri, di, delta_ms, info)
                         candidates.append(candidate)
                         if (info is not None and (not requires_info_sync or
                                 (stamp_ns(info) and abs(stamp_ns(info)-stamp_ns(rgb)) <= 50_000_000))):
@@ -159,6 +166,7 @@ class TargetNode(CameraReceiver):
             self.info_wait_started_at = None
             _, _, ri, di, delta_ms, info = max(complete or candidates, key=lambda c: c[:5])
             rgb, _ = rgb_queue[ri]
+            self.last_pair_rgb_stamp_ns = stamp_ns(rgb)
             depth, _ = depth_queue[di]
             for _ in range(ri + 1):
                 rgb_queue.popleft()
@@ -198,7 +206,8 @@ def process_pair(pair, args, node, estimator):
         estimator.history.clear()
         raise ValueError('Waiting for RGB captured after recognition started')
     age = (node.get_clock().now().nanoseconds - stamp_ns(rgb_msg)) / 1e9
-    if not -.1 <= age <= args.max_result_age_ms / 1000:
+    age_limit = min(args.max_result_age_ms,getattr(args,'max_age_ms',250.))/1000
+    if not -.05 <= age <= age_limit:
         estimator.history.clear()
         raise ValueError('RGB-D pair outside result age limit')
     if (rgb_msg.header.frame_id != OPTICAL_FRAME or (rgb_msg.height, rgb_msg.width) != SHAPE):
@@ -215,7 +224,7 @@ def process_pair(pair, args, node, estimator):
     seed = node.take_seed(stamp_ns(rgb_msg))
     measurement = estimator.process(image, depth, intrinsics, stamp_ns(rgb_msg), seed)
     age = (node.get_clock().now().nanoseconds - stamp_ns(rgb_msg)) / 1e9
-    if not -.1 <= age <= args.max_result_age_ms / 1000:
+    if not -.05 <= age <= age_limit:
         estimator.history.clear()
         raise ValueError('RGB-D processing result outside age limit')
     status = (f'TRACKED_RGBD; class={estimator.seed_class}; '
@@ -271,9 +280,12 @@ def main():
                 if now-last_pair > args.max_age_ms / 1000 and now-last_invalid > .2:
                     # Numbers become invalid now. Preserve visual state only
                     # within its separate 500-ms optical-flow gap limit.
-                    if now-last_pair > .5:
+                    if now-last_pair > estimator.tracker.recovery_gap_s:
                         estimator.reset('camera RGB-D input gap exceeded 500 ms')
-                    node.publisher.publish(empty_message(node.get_clock().now().to_msg(), node.status))
+                        gap_status='LOST: camera input gap exceeded RGB verification lifetime'
+                    else:
+                        gap_status=node.status
+                    node.publisher.publish(empty_message(node.get_clock().now().to_msg(), gap_status))
                     last_invalid = now
                 time.sleep(.002)
                 continue

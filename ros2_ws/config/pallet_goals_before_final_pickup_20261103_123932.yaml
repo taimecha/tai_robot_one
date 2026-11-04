@@ -1,0 +1,220 @@
+schema_version: 1
+map:
+  frame_id: map
+  yaml_file: ../maps/tai_map_real_edited.yaml
+  yaml_sha256: 22edc78f3f4147b8d73e23743cbb765df5c218e6ae755bf3468f42966f776a72
+  image_sha256: 31b5a984e6a1bad92c5c3fb44f3eef0625c8c49fbed3564229fe155d685f5925
+  resolution: 0.05
+  origin:
+  - -4.066
+  - -3.243
+  - 0
+pallets:
+  pallet_1:
+    recognition:
+      label: Pallet 1 xanh - recognition
+      recorded_at: '2026-11-03T10:22:34+07:00'
+      frame_id: map
+      robot_frame: base_footprint
+      position:
+        x: 2.940598741127163
+        y: 1.241054822778418
+        z: 0.0
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: -0.7116365159433388
+        w: 0.7025478412008865
+      yaw_rad: -1.5836497423593432
+      yaw_deg: -90.73644646417056
+      capture:
+        method: stationary lidar scan matching, then AMCL map-to-base_footprint TF
+        samples: 368
+        window_s: 3.507
+        x_range_m: 0.007687422403626076
+        y_range_m: 0.012014419770274287
+        yaw_range_deg: 0.19473431633625182
+        max_tf_age_s: 0.03628063201904297
+        amcl_covariance:
+          x_variance: 0.0023852384304658696
+          y_variance: 0.0032564699730654838
+          yaw_variance: 0.0009964704482288327
+        rgbd_5s_report: ../../camera/detect_astra/data/diagnostics/pallet_1_new_recognition_20261103_5s.json
+        pallet_camera_forward_m: 1.3939925408521234
+        pallet_lateral_m: -0.008841696651714132
+        pallet_entry_heading_deg: 0.38658958871363536
+        rgbd_valid_samples: 151
+        rgbd_max_gap_s: 0.07167549300004339
+        rgbd_10s_report: ../../camera/detect_astra/data/diagnostics/pallet_1_new_recognition_20261103_warmed10s.json
+      status: needs_visual_revalidation
+      reason: Saved map pose is retained; post-motion RGB-D disagreed with the prior
+        pallet target by more than the safe continuity limit. Recheck the green opening
+        visually before activating this goal.
+    pickup:
+      label: Pallet 1 xanh - lay va nang hang (day bang RViz)
+      status: recorded
+      recorded_at: '2026-11-03T12:31:40.431332+07:00'
+      frame_id: map
+      robot_frame: base_footprint
+      position:
+        x: 2.9004399119963242
+        y: -0.19383658014309502
+        z: 0.0
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: -0.700255854153261
+        w: 0.7138919657231666
+      yaw_rad: -1.5515116540451404
+      yaw_deg: -88.89506964214802
+      capture:
+        method: stationary latest map-to-odom composed with latest odom-to-base_footprint
+          TF
+        samples: 440
+        window_s: 4.018445560001055
+        x_range_m: 0.0
+        y_range_m: 0.0
+        yaw_range_deg: 0.0023663353038113582
+        max_odom_tf_age_s: 0.29684561039587404
+        max_localization_tf_age_s: 0.006713223893066389
+        max_abs_linear_mps: 1.4571677198205186e-17
+        max_abs_angular_rps: 0.003184865199244605
+        amcl_covariance:
+          x_variance: 0.0018068071426387395
+          y_variance: 0.0015140937057906059
+          yaw_variance: 0.0009813805281914435
+        nav_statuses:
+        - 4
+        - 4
+        - 4
+        - 4
+        - 6
+        - 4
+        - 4
+        - 4
+        - 4
+        - 4
+        - 4
+        - 6
+        - 4
+        - 4
+        - 6
+        - 6
+        - 6
+        - 4
+      source: operator_selected_nav2_goal_then_stationary_actual_robot_pose
+      operator_instruction: Use this station for pallet 1 green pickup and lifting.
+        Previous pickup stations are superseded. Replace this saved station only when
+        the operator explicitly requests reteaching.
+      capture_report: ../../camera/detect_astra/data/diagnostics/pallet_1_operator_taught_pickup_station_20261103.json
+    dropoff:
+      label: Pallet 1 xanh - dropoff
+      status: pending_reteach
+      reason: Old goal invalidated; record at new physical station after verified
+        motion
+archived_pallet_1_goals_2026_11_01:
+  recognition:
+    label: Pallet 1 - recognition
+    recorded_at: '2026-11-01T12:01:38+07:00'
+    frame_id: map
+    robot_frame: base_footprint
+    position:
+      x: 3.0256933172694933
+      y: 1.488944181473703
+      z: 0.0
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: -0.7071067811865475
+      w: 0.7071067811865476
+    yaw_rad: -1.5707963267948966
+    yaw_deg: -90.0
+    capture:
+      method: stationary map-to-base_footprint TF
+      samples: 38
+      window_s: 4.032
+      x_range_m: 8.881784197001252e-16
+      y_range_m: 2.220446049250313e-16
+      yaw_range_deg: 0.003920541242462118
+      max_tf_age_s: 0.290718575
+      lidar_yaw_deg: 0.0
+      amcl_covariance:
+        x_variance: 0.009548851362889847
+        y_variance: 0.005261745204876718
+        yaw_variance: 0.007312716858691056
+      amcl_standard_deviation:
+        x_m: 0.09771822431302078
+        y_m: 0.07253788806462949
+        yaw_deg: 4.89961563181735
+      stationary_scan_updates_applied: true
+    status: recorded
+  pickup:
+    label: Pallet 1 - pickup
+    recorded_at: '2026-11-01T12:23:21+07:00'
+    frame_id: map
+    robot_frame: base_footprint
+    position:
+      x: 2.976802885580789
+      y: -0.19648969320318954
+      z: 0.0
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: -0.7071067811865475
+      w: 0.7071067811865476
+    yaw_rad: -1.5707963267948966
+    yaw_deg: -90.0
+    capture:
+      method: stationary map-to-base_footprint TF
+      samples: 38
+      window_s: 4.036
+      x_range_m: 4.440892098500626e-16
+      y_range_m: 1.1102230246251565e-16
+      yaw_range_deg: 0.002819099748633925
+      max_tf_age_s: 0.277390439
+      lidar_yaw_deg: 0.0
+      amcl_covariance:
+        x_variance: 0.002625605231689125
+        y_variance: 0.0024448022325544473
+        yaw_variance: 0.0016665420249693732
+      amcl_standard_deviation:
+        x_m: 0.05124065994587818
+        y_m: 0.04944494142533134
+        yaw_deg: 2.3390029376062973
+      stationary_scan_updates_applied: false
+    status: recorded
+  dropoff:
+    label: Pallet 1 - dropoff
+    recorded_at: '2026-11-01T12:28:22+07:00'
+    frame_id: map
+    robot_frame: base_footprint
+    position:
+      x: 0.2009506294562451
+      y: -0.4480836326995459
+      z: 0.0
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: -1.0
+      w: 6.123233995736766e-17
+    yaw_rad: -3.141592653589793
+    yaw_deg: -180.0
+    capture:
+      method: stationary map-to-base_footprint TF
+      samples: 39
+      window_s: 4.068
+      x_range_m: 8.881784197001252e-16
+      y_range_m: 2.220446049250313e-16
+      yaw_range_deg: 0.0017053151157438652
+      max_tf_age_s: 0.22399999
+      lidar_yaw_deg: 0.0
+      amcl_covariance:
+        x_variance: 0.0022984439265243354
+        y_variance: 0.001181808112888317
+        yaw_variance: 0.002021378151926531
+      amcl_standard_deviation:
+        x_m: 0.04794208930078387
+        y_m: 0.03437743610114514
+        yaw_deg: 2.5760033060769585
+      stationary_scan_updates_applied: false
+    status: recorded

@@ -28,15 +28,20 @@ from pallet_preview import draw_detections
 from pallet_acquisition import AcquisitionSession, valid_target
 from pallet_goal_gate import RecognitionGoalGate
 from pallet_rgbd_health import RGBDHealth
-from pallet_detection_selection import unique_pallet_indices, PALLET_CLASSES
+from pallet_detection_selection import PALLET_CLASSES
+from pallet_semantic_search import PalletSemanticSearch
 
 
 class DetectionNode(Node):
     def __init__(self, args):
         super().__init__('pallet_detection')
         self.args = args
+        self.semantic_search = PalletSemanticSearch(getattr(args,'target_color','any'))
         self.lock = threading.Lock()
         self.pending_images = {'rgb': deque(maxlen=1)}
+        self.last_rgb_received = None
+        self.last_rgb_stamp = 0
+        self.auto_start_pending = False
         self.inference_enabled = not args.start_paused
         self.inference_generation = 0
         self.inference_busy = False
@@ -53,6 +58,7 @@ class DetectionNode(Node):
         self.acquisition = AcquisitionSession(getattr(args, 'max_seed_age_ms', 1000.)/1000)
         self.alignment_active = False
         self.alignment_reserved_until = 0.
+        self.checkpoint_permission_until=0.
         self.prepare_waiters = []
         if self.inference_enabled:
             self.acquisition.start(time.monotonic(), self.get_clock().now().nanoseconds/1e9)
@@ -93,6 +99,10 @@ class DetectionNode(Node):
             state.update(inference_attempts=self.inference_attempts, inference_ms=self.inference_ms,
                          input_age_ms=self.input_age_ms, result_age_ms=self.result_age_ms,
                          last_issue=self.last_issue)
+            now = self.get_clock().now().nanoseconds
+            state['camera_ready'] = (self.last_rgb_received is not None and
+                time.monotonic()-self.last_rgb_received <= .25 and
+                -50_000_000 <= now-self.last_rgb_stamp <= 250_000_000)
             state['rgbd_health'] = self.rgbd_health.snapshot(
                 time.monotonic(), self.get_clock().now().nanoseconds/1e9)
             state['rgbd_health']['stable'] &= (self.acquisition.locked
@@ -100,7 +110,7 @@ class DetectionNode(Node):
             state['goal_gate'] = self.goal_gate.snapshot() if self.goal_gate is not None else None
             state['yolo_stopped_ros_s'] = self.measure_after_ros
             if self.acquisition.locked:
-                state['reason'] = ('Cửa sổ RGB + Depth 5 giây đạt; chưa xác nhận cho xe căn thật' if
+                state['reason'] = ('Cửa sổ RGB + Depth 5 giây đạt; chờ bấm bắt đầu và kiểm tra điều kiện căn xe' if
                     state['rgbd_health']['stable'] else
                     'Đã xác nhận pallet; YOLO tắt. Đang kiểm tra độ ổn định RGB + Depth (5 giây)')
             self.phase_publisher.publish(String(data=json.dumps(state, allow_nan=False)))
@@ -123,6 +133,7 @@ class DetectionNode(Node):
                     msg.camera_forward_m, msg.opening_lateral_m, msg.entry_heading_rad)
 
     def invalidate_locked(self, reason):
+        self.auto_start_pending = False
         self.pause_locked()
         self.acquisition.pause()
         self.acquisition.locked = False
@@ -132,6 +143,10 @@ class DetectionNode(Node):
         self.measure_after_ros = None
 
     def start_locked(self):
+        self.auto_start_pending = False
+        # An old in-flight inference may finish after this request. Give the
+        # new generation its own global-search state, just like its seed gate.
+        self.semantic_search = PalletSemanticSearch(getattr(self.args,'target_color','any'))
         self.inference_enabled = True
         self.inference_generation += 1
         self.pending_images['rgb'].clear()
@@ -170,9 +185,15 @@ class DetectionNode(Node):
         try:
             state = json.loads(msg.data)
             active = state.get('active') is True or state.get('preparing') is True
+            checkpoint=(state.get('state')=='CHECKPOINT_RECOGNITION'
+                and state.get('strategy')=='pallet_insertion_odom'
+                and state.get('active') is True and state.get('perception_refresh_allowed') is True
+                and state.get('linear_mps')==0. and state.get('angular_rps')==0.)
         except (ValueError, AttributeError):
             return
         with self.lock:
+            self.checkpoint_permission_until=time.monotonic()+.6 if checkpoint else 0.
+            if checkpoint:active=False
             self.alignment_active = active
             if active:
                 self.pause_locked()
@@ -180,6 +201,8 @@ class DetectionNode(Node):
     def control_tick(self):
         wall, now = time.monotonic(), self.get_clock().now().nanoseconds/1e9
         with self.lock:
+            if self.checkpoint_permission_until and wall>self.checkpoint_permission_until:
+                self.checkpoint_permission_until=0.;self.alignment_active=True;self.pause_locked()
             if self.acquisition.tick(wall, now):
                 self.pause_locked()
             if (not self.inference_enabled and not self.inference_busy and self.acquisition.locked
@@ -190,11 +213,22 @@ class DetectionNode(Node):
             for future, deadline in self.prepare_waiters:
                 if future.done():
                     continue
-                if not self.inference_busy or wall >= deadline:
-                    ready = (not self.inference_enabled and not self.inference_busy
-                             and self.acquisition.locked and self.acquisition.measurement_ready(wall, now))
-                    future.set_result((ready, 'YOLO đã tắt; phép đo sẵn sàng' if ready else
-                        'Chưa xác nhận pallet/phép đo mới hoặc YOLO chưa dừng xong'))
+                ready = (not self.inference_enabled and not self.inference_busy
+                         and self.acquisition.locked and self.acquisition.measurement_ready(wall, now))
+                # An idle inference worker does not imply that the next RGB-D
+                # measurement has arrived. Keep the bounded handshake pending
+                # across a transient invalid/stale sample instead of rejecting
+                # immediately between camera frames.
+                if ready or (not self.inference_busy and not self.acquisition.locked) or wall >= deadline:
+                    if ready:
+                        reason = 'YOLO đã tắt; phép đo sẵn sàng'
+                    elif self.inference_enabled or self.inference_busy:
+                        reason = 'YOLO chưa dừng xử lý xong trong thời gian chờ'
+                    elif not self.acquisition.locked:
+                        reason = 'Chưa xác nhận pallet; bấm Nhận diện lại trước khi căn xe'
+                    else:
+                        reason = 'Chưa đủ phép đo RGB-D mới hợp lệ sau khi tắt YOLO'
+                    future.set_result((ready, reason))
                 else:
                     remaining.append((future, deadline))
             self.prepare_waiters = remaining
@@ -212,6 +246,7 @@ class DetectionNode(Node):
 
     def set_enabled(self, request, response):
         with self.lock:
+            self.auto_start_pending = False
             if request.data and self.goal_gate is not None and (
                     self.goal_gate.armed or self.goal_gate.navigation_active
                     or self.goal_gate.phase != 'GOAL_SUCCEEDED'):
@@ -237,6 +272,10 @@ class DetectionNode(Node):
 
     def receive(self, stream, msg):
         with self.lock:
+            if (stream == 'rgb' and msg.header.frame_id == OPTICAL_FRAME and
+                    (msg.height,msg.width) == SHAPE):
+                self.last_rgb_received = time.monotonic()
+                self.last_rgb_stamp = stamp_ns(msg)
             if self.inference_enabled:
                 self.pending_images[stream].append((msg, time.monotonic()))
 
@@ -293,18 +332,16 @@ class DetectionNode(Node):
             self.inference_issue(f'Ảnh đầu vào YOLO quá cũ: {age*1000:.0f} ms')
             return
         image = decode_image(rgb_msg)
-        result = model.predict(image, conf=self.args.conf, iou=self.args.nms_iou, imgsz=SHAPE,
-                               retina_masks=True, device=self.args.device, verbose=False)[0]
+        result = self.semantic_search.predict(image, model, self.args.conf,
+                                             self.args.nms_iou, self.args.device)
         detection = PalletDetection()
         detection.header = rgb_msg.header
-        boxes = result.boxes.xyxy.cpu().numpy()
-        classes = result.boxes.cls.cpu().numpy()
-        confidence = result.boxes.conf.cpu().numpy()
-        indices = unique_pallet_indices(boxes, classes, confidence, result.names)
-        detection.status = f'expected one pallet, found {len(indices)}'
-        if len(indices) == 1 and result.masks is not None:
-            index = indices[0]
-            mask = result.masks.data[index].cpu().numpy().astype(np.uint8)
+        boxes, classes, confidence = result.boxes, result.classes, result.confidence
+        indices = result.pallet_indices
+        detection.status = result.status
+        if result.seed_index is not None:
+            index = result.seed_index
+            mask = result.masks[index].astype(np.uint8)
             if mask.shape != SHAPE:
                 raise ValueError('YOLO mask is not full-resolution RGB coordinates')
             ok, png = cv2.imencode('.png', mask * 255)
@@ -312,9 +349,9 @@ class DetectionNode(Node):
                 raise ValueError('Could not encode seed mask')
             detection.valid = True
             detection.status = 'YOLO_SEED'
-            detection.class_name = result.names[int(result.boxes.cls[index].item())]
-            detection.confidence = float(result.boxes.conf[index].item())
-            detection.bbox_xyxy = result.boxes.xyxy[index].cpu().numpy().astype(float).tolist()
+            detection.class_name = result.names[int(classes[index])]
+            detection.confidence = float(confidence[index])
+            detection.bbox_xyxy = boxes[index].astype(float).tolist()
             detection.rgb = rgb_msg
             detection.mask.header = rgb_msg.header
             detection.mask.format = 'png'
@@ -347,23 +384,40 @@ def load_model(args):
     # Only this process imports or loads a neural network.
     import torch
     from ultralytics import YOLO
-    torch.set_num_threads(args.cpu_threads)
+    import yaml
+    # NCNN owns neural-network threads; Torch only handles its small outputs.
+    torch.set_num_threads(1 if args.model.is_dir() else args.cpu_threads)
     model = YOLO(str(args.model), task='segment')
     if model.task != 'segment':
         raise ValueError('Expected a YOLO segmentation model')
-    model.predict(np.zeros((*SHAPE, 3), np.uint8), imgsz=SHAPE, retina_masks=True,
+    input_shape = SHAPE
+    metadata = args.model/'metadata.yaml'
+    if args.model.is_dir() and metadata.is_file():
+        input_shape = tuple(yaml.safe_load(metadata.read_text())['imgsz'])
+        if len(input_shape)!=2 or any(not isinstance(v,int) or v<32 or v%32 for v in input_shape):
+            raise ValueError('Invalid NCNN model input dimensions')
+    model._pallet_input_shape = input_shape
+    model.predict(np.zeros((*SHAPE, 3), np.uint8), imgsz=input_shape, retina_masks=True,
                   device=args.device, verbose=False)
     param = next(args.model.glob('*.ncnn.param'), None) if args.model.is_dir() else None
     if param is not None:
+        import ncnn
         net = model.predictor.model.net
         net.clear()
         net.opt.num_threads = args.cpu_threads
         net.opt.openmp_blocktime = 0
-        net.opt.use_fp16_packed = False
-        net.opt.use_fp16_storage = False
-        net.opt.use_fp16_arithmetic = False
+        native_fp16 = (getattr(args,'ncnn_precision','auto') == 'auto' and
+                       bool(ncnn.cpu_support_arm_asimdhp()))
+        net.opt.use_fp16_packed = native_fp16
+        net.opt.use_fp16_storage = native_fp16
+        net.opt.use_fp16_arithmetic = native_fp16
         if net.load_param(str(param)) != 0 or net.load_model(str(param.with_suffix('.bin'))) != 0:
-            raise ValueError('Could not load FP32 NCNN model')
+            raise ValueError('Could not load NCNN model')
+        # Loading new NCNN options invalidates its warmup. Finish that work
+        # before the bounded recognition session and its image-age clock start.
+        model.predict(np.zeros((*SHAPE,3),np.uint8),imgsz=input_shape,retina_masks=True,
+                      device=args.device,verbose=False)
+        print('NCNN precision: '+('native ARM FP16' if native_fp16 else 'FP32'),flush=True)
     return model
 
 
@@ -372,11 +426,14 @@ def main():
     # Prefer current camera/measurement callbacks when inference saturates CPU.
     # This affects only the detector process, not the RGB-D tracker.
     import os
-    os.nice(5)
+    os.nice(2)
     cv2.setNumThreads(1)
     model = load_model(args)
     rclpy.init()
+    start_when_ready = not args.start_paused
+    args.start_paused = True
     node = DetectionNode(args)
+    node.auto_start_pending = start_when_ready
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     spin_stop = threading.Event()
@@ -391,6 +448,17 @@ def main():
     next_at = 0.0
     try:
         while rclpy.ok():
+            if node.auto_start_pending:
+                with node.lock:
+                    fresh = (node.last_rgb_received is not None and
+                             time.monotonic()-node.last_rgb_received <= .25 and
+                             -.05 <= (node.get_clock().now().nanoseconds-
+                                      node.last_rgb_stamp)/1e9 <= .25)
+                    if fresh:
+                        node.start_locked()
+                if node.auto_start_pending:
+                    time.sleep(.01)
+                    continue
             enabled, generation = node.inference_state()
             if not enabled or time.monotonic() < next_at:
                 time.sleep(.01)
