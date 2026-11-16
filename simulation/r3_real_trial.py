@@ -22,15 +22,17 @@ from geometry_msgs.msg import Twist
 from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import Odometry
 from nav2_msgs.msg import CollisionMonitorState
+from rclpy.executors import SingleThreadedExecutor, TimeoutException
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Imu, LaserScan
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from detected_pallets_interfaces.msg import PalletTarget
 
-from r3_core import FrozenPlan, errors, fork_for_base, wrap
+from r3_core import FrozenPlan, errors, fork_for_base, wrap, compose
 from r3_real_obstacle_filter import read_real_target
 from r3_sim import FixedPlanFollower, write_csv
+from r3_localization_contract import localization_spec, checked_status
 
 LIDAR_TIMEOUT_S = 1.0
 LIDAR_START_FRESH_S = .30
@@ -41,6 +43,71 @@ IMU_ODOM_MAX_DISAGREEMENT_DEG = 2.0
 YOLO_HEARTBEAT_TIMEOUT_S = .70
 SENSOR_HOLD_LATCH_S = 1.0
 C_RGBD_WAIT_LIMIT_S = 6.0
+CONTROL_PERIOD_S = .05
+INPUT_DRAIN_BUDGET_S = .015
+
+
+def sensor_age(receive_age, capture_stamp, now_ros):
+    """Include transport age, without extending freshness on message receipt."""
+    if capture_stamp is None:  # No accepted message yet; pose/IMU guards also apply.
+        return receive_age
+    capture_age = now_ros-capture_stamp
+    return max(receive_age, capture_age) if capture_age >= -.05 else float('inf')
+
+
+def drain_control_inputs(node, executor, max_callbacks=64):
+    """Take pending source callbacks before deciding whether a source is stale.
+
+    Sensor subscriptions retain one sample. A delayed control cycle must read
+    that latest sample before testing its age, rather than run an overdue ROS
+    timer ahead of queued input. Bound the drain so busy sources cannot prevent
+    command generation. Source header age checks remain in each callback.
+    """
+    started = time.monotonic()
+    initial_revision = node.input_revision
+    handled = 0
+    empty_waits = 0
+    while (not node.finished and handled < max_callbacks
+           and time.monotonic()-started < INPUT_DRAIN_BUDGET_S):
+        try:
+            handler, _, _ = executor.wait_for_ready_callbacks(timeout_sec=0.)
+        except TimeoutException:
+            # An iterator left by the waiting spin may describe an earlier
+            # readiness snapshot. Its first timeout exhausts that snapshot;
+            # refresh the wait set once before declaring the queue empty.
+            empty_waits += 1
+            if empty_waits >= 2:
+                break
+            continue
+        # Same task/error handling as SingleThreadedExecutor.spin_once. A
+        # discovery/QoS event is work too; it does not mean the inputs are empty.
+        handler()
+        if handler.exception() is not None:
+            raise handler.exception()
+        handler.result()
+        handled += 1
+        empty_waits = 0
+    return node.input_revision-initial_revision, time.monotonic()-started
+
+
+def run_control_loop(node, executor):
+    """Service inputs continuously and compute commands at 20 Hz, without catch-up ticks."""
+    next_tick = time.monotonic()
+    while rclpy.ok() and not node.finished:
+        now = time.monotonic()
+        if now < next_tick:
+            executor.spin_once(timeout_sec=min(.01, next_tick-now))
+            continue
+        count, duration = drain_control_inputs(node, executor)
+        node.input_drain_callbacks = count
+        node.input_drain_duration_s = duration
+        if node.finished:
+            break
+        tick_started = time.monotonic()
+        node.tick()
+        # Never replay expired timer events after a slow callback. Drain fresh
+        # input again before the next scheduled control decision.
+        next_tick = max(tick_started+CONTROL_PERIOD_S, time.monotonic())
 
 
 def diagnostic_numbers(values):
@@ -56,7 +123,7 @@ class OdomImuDiagnostics:
     sensor_msgs/Imu does not contain the BNO055's calibration status.
     """
     def __init__(self, max_samples=6000, interval_s=.05):
-        self.latest = {'wheel_odom': None, 'fused_odom': None, 'imu': None}
+        self.latest = {'wheel_odom': None, 'fused_odom': None, 'imu': None, 'localized_odom': None}
         self.rows = deque(maxlen=max_samples)
         self.interval_s = interval_s
         self.last_sample = None
@@ -90,18 +157,19 @@ class OdomImuDiagnostics:
             linear_acceleration_covariance=diagnostic_numbers(msg.linear_acceleration_covariance),
             calibration_status_available=False)
 
-    def sample(self, monotonic_s, wall_s, state, pose, command):
+    def sample(self, monotonic_s, wall_s, state, pose, command, heading_source='odom_ekf'):
         if self.last_sample is not None and monotonic_s-self.last_sample < self.interval_s-1e-6:
-            return
+            return False
         self.last_sample = monotonic_s
         if len(self.rows) == self.rows.maxlen:
             self.dropped_samples += 1
         self.rows.append(dict(monotonic_s=monotonic_s, wall_s=wall_s, state=state,
-                              control_heading_source='odom_ekf',
+                              control_heading_source=heading_source,
                               accepted_control_pose_xyyaw=(diagnostic_numbers(pose)
                                                            if pose is not None else None),
                               issued_cmd_v_mps=command[0], issued_cmd_w_rps=command[1],
                               **self.latest))
+        return True
 
     def write(self, output):
         output.mkdir(parents=True, exist_ok=True)
@@ -154,20 +222,31 @@ def check_c_rgbd(samples, odom_gap_m, odom_yaw_error_rad, now):
 
 
 class RealTrial(Node):
-    def __init__(self, plan, output, stop_at_c=False):
+    def __init__(self, plan, output, stop_at_c=False, control_timer=True):
         super().__init__('r3_real_fixed_plan_trial')
         self.plan = plan
         self.output = output
         self.stop_at_c = stop_at_c
         self.geometry = json.loads(plan.geometry_json)
         self.target = json.loads(plan.target_json)['pose']
+        self.localization = localization_spec(json.loads(plan.target_json))
+        self.localized_pose = None
+        self.localized_wall = 0.
+        self.localized_capture_stamp = None
+        self.localization_status = None
+        self.control_odom_status = None
+        self.last_control_mode=None
+        self.last_control_pose = None
+        self.heading_source = 'amcl_odom_ekf' if self.localization else 'odom_ekf'
         self.phases = json.loads(plan.phases_json)
         self.follow = FixedPlanFollower(self.phases, self.target, self.geometry)
         self.pose = None
         self.twist = None
         self.odom_wall = 0.
+        self.odom_capture_stamp = None
         self.imu_yaw = None
         self.imu_wall = 0.
+        self.imu_capture_stamp = None
         self.imu_anchor = None
         self.scan_wall = {'lidar': 0.}
         self.lidar_stable_since = 0.
@@ -195,18 +274,79 @@ class RealTrial(Node):
         self.c_rgbd_report = None
         self.c_last_issue = 'no fresh pallet RGB-D at C'
         self.c_braking_since = None
+        self.input_revision = 0
+        self.input_drain_callbacks = 0
+        self.input_drain_duration_s = 0.
+        self.last_publish_duration_s = 0.
+        self.last_tick_started = None
         self.publisher = self.create_publisher(Twist, '/pallet/r3/cmd_vel', 1)
-        self.create_subscription(Odometry, '/odom', self.on_odom, qos_profile_sensor_data)
-        self.create_subscription(Odometry, '/base_controller/odom', self.on_wheel_odom,
-                                 qos_profile_sensor_data)
-        self.create_subscription(Imu, '/imu', self.on_imu, qos_profile_sensor_data)
-        self.create_subscription(LaserScan, '/pallet/r3/filtered_lidar_scan',
-                                 lambda _: self.on_scan('lidar'), qos_profile_sensor_data)
-        self.create_subscription(CollisionMonitorState, '/pallet/r3/collision_state',
-                                 self.on_collision_state, 1)
-        self.create_subscription(Bool, '/pallet/enabled', self.on_yolo_enabled, 1)
-        self.create_subscription(PalletTarget, '/pallet/target', self.on_target, 1)
-        self.create_timer(.05, self.tick)
+        latest_sensor = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.subscribe_input(Odometry, '/odom', self.on_odom, latest_sensor)
+        if self.localization:
+            self.subscribe_input(Odometry, '/pallet/r3/localized_odom',
+                                 self.on_localized_odom, latest_sensor)
+            status_topic=self.localization.get('control_status_topic','/pallet/r3/localization/status')
+            self.subscribe_input(String, status_topic, self.on_localization,
+                QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            if status_topic!='/pallet/r3/control_odom/status':
+                self.subscribe_input(String, '/pallet/r3/control_odom/status',self.on_control_odom_status,
+                    QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.subscribe_input(Odometry, '/base_controller/odom', self.on_wheel_odom, latest_sensor)
+        self.subscribe_input(Imu, '/imu', self.on_imu, latest_sensor)
+        self.subscribe_input(LaserScan, '/pallet/r3/filtered_lidar_scan',
+                             lambda _: self.on_scan('lidar'), latest_sensor)
+        self.subscribe_input(CollisionMonitorState, '/pallet/r3/collision_state',
+                             self.on_collision_state, 1)
+        self.subscribe_input(Bool, '/pallet/enabled', self.on_yolo_enabled, 1)
+        self.subscribe_input(PalletTarget, '/pallet/target', self.on_target, 1)
+        if control_timer:
+            self.create_timer(CONTROL_PERIOD_S, self.tick)
+
+    def subscribe_input(self, message_type, topic, callback, qos):
+        def receive(message):
+            self.input_revision += 1
+            callback(message)
+        return self.create_subscription(message_type, topic, receive, qos)
+
+    def on_localization(self, msg):
+        try:
+            self.localization_status = checked_status(
+                msg.data, self.get_clock().now().nanoseconds*1e-9, self.localization)
+            if self.localization_status.get('control_status_topic')=='/pallet/r3/control_odom/status':
+                self.control_odom_status=self.localization_status
+                mode=self.localization_status.get('control_mode')
+                if mode!=self.last_control_mode:
+                    self.last_control_mode=mode
+                    if mode=='ekf_tracking':
+                        self.get_logger().info('AMCL đang cập nhật chậm/chưa hợp lệ; tiếp tục bám đường bằng EKF trong mốc đã khóa.')
+                    elif mode=='amcl_corrected_ekf':
+                        self.get_logger().info('Đã nhận hiệu chỉnh AMCL hợp lệ; tiếp tục kết hợp với EKF.')
+        except (ValueError, TypeError, KeyError) as exc:
+            self.localization_status = None
+            if self.started:
+                self.fail(str(exc))
+
+    def on_localized_odom(self, msg):
+        self.diagnostics.on_odom('localized_odom',msg,time.monotonic())
+        p,q = msg.pose.pose.position, msg.pose.pose.orientation
+        stamp = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
+        now = self.get_clock().now().nanoseconds*1e-9
+        if (msg.header.frame_id != 'r3_trial' or msg.child_frame_id != 'base_footprint'
+                or not -.05 <= now-stamp <= ODOM_TIMEOUT_S
+                or not all(math.isfinite(v) for v in (p.x,p.y,q.x,q.y,q.z,q.w))
+                or abs(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w-1) > .02):
+            return
+        self.localized_pose = (p.x,p.y,math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)))
+        self.localized_wall = time.monotonic()
+        self.localized_capture_stamp = stamp
+
+    def on_control_odom_status(self,msg):
+        try:
+            value=json.loads(msg.data)
+            self.control_odom_status=value if isinstance(value,dict) else None
+        except (ValueError,TypeError):
+            self.control_odom_status=None
+
 
     def on_odom(self, msg):
         self.diagnostics.on_odom('fused_odom', msg, time.monotonic())
@@ -231,6 +371,7 @@ class RealTrial(Node):
             self.fail('odom jumped or reset')
             return
         self.prev_pose, self.pose, self.odom_wall = pose, pose, time.monotonic()
+        self.odom_capture_stamp = stamp
         self.twist = (msg.twist.twist.linear.x, msg.twist.twist.angular.z)
 
     def on_wheel_odom(self, msg):
@@ -252,6 +393,7 @@ class RealTrial(Node):
             self.fail('IMU heading jumped or reset')
             return
         self.imu_yaw, self.imu_wall = yaw, time.monotonic()
+        self.imu_capture_stamp = stamp
 
     def imu_control_pose(self):
         if self.pose is None or self.imu_yaw is None or self.imu_anchor is None:
@@ -308,7 +450,9 @@ class RealTrial(Node):
     def send(self, v=0., w=0.):
         cmd = Twist()
         cmd.linear.x, cmd.angular.z = v, w
+        started = time.monotonic()
         self.publisher.publish(cmd)
+        self.last_publish_duration_s = time.monotonic()-started
         self.last_command = (v, w)
 
     def fail(self, reason):
@@ -317,11 +461,27 @@ class RealTrial(Node):
         self.send()
 
     def tick(self):
+        started = time.monotonic()
+        interval = started-self.last_tick_started if self.last_tick_started is not None else None
+        self.last_tick_started = started
         try:
             self.control_tick()
         finally:
-            self.diagnostics.sample(time.monotonic(), time.time(), self.state,
-                                    self.pose, self.last_command)
+            sampled = self.diagnostics.sample(time.monotonic(), time.time(), self.state,
+                                              self.last_control_pose or self.pose, self.last_command,
+                                              self.heading_source)
+            if sampled:
+                self.diagnostics.rows[-1]['control_loop'] = dict(
+                    tick_interval_s=interval,
+                    tick_duration_s=time.monotonic()-started,
+                    publish_duration_s=self.last_publish_duration_s,
+                    input_drain_callbacks=self.input_drain_callbacks,
+                    input_drain_duration_s=self.input_drain_duration_s)
+            if self.localization and sampled:
+                self.diagnostics.rows[-1]['localization'] = self.localization_status
+                self.diagnostics.rows[-1]['control_odom_status'] = self.control_odom_status
+                self.diagnostics.rows[-1]['localized_odom_receive_age_s']=(
+                    time.monotonic()-self.localized_wall if self.localized_wall else None)
 
     def control_tick(self):
         wall = time.monotonic()
@@ -331,8 +491,27 @@ class RealTrial(Node):
         if self.finished:
             self.send()
             return
-        odom_age = wall - self.odom_wall
-        imu_age = wall - self.imu_wall
+        now_ros = self.get_clock().now().nanoseconds*1e-9
+        if self.localization:
+            try:
+                checked_status(self.localization_status or {},
+                               now_ros, self.localization)
+                localized_age = sensor_age(wall-self.localized_wall,
+                                           self.localized_capture_stamp, now_ros)
+                if self.localized_pose is None or localized_age > ODOM_TIMEOUT_S:
+                    raise ValueError('localized odom unavailable '
+                        f'(last valid receive age {wall-self.localized_wall:.3f}s; '
+                        f'source age {localized_age:.3f}s; '
+                        f'EKF receive age {wall-self.odom_wall:.3f}s; limit {ODOM_TIMEOUT_S:.2f}s)')
+            except (ValueError, TypeError, KeyError) as exc:
+                self.send()
+                if self.started or (self.armed_at is not None and wall-self.armed_at > 10.):
+                    self.fail(str(exc))
+                return
+        control_pose = self.localized_pose if self.localization else self.pose
+        self.last_control_pose = control_pose
+        odom_age = sensor_age(wall-self.odom_wall, self.odom_capture_stamp, now_ros)
+        imu_age = sensor_age(wall-self.imu_wall, self.imu_capture_stamp, now_ros)
         yolo_age = wall - self.yolo_wall
         lidar_age = wall - self.scan_wall['lidar']
         missing = []
@@ -364,13 +543,18 @@ class RealTrial(Node):
             self.last_tick = self.last_progress_wall = wall
             self.sensor_hold_since = None
         if not self.started:
+            if self.localization and self.localization_status.get('correction_settled') is not True:
+                self.send()
+                if self.armed_at is not None and wall-self.armed_at > 10.:
+                    self.fail('AMCL correction did not settle at start; recognize again')
+                return
             if (self.monitor_stop or wall - self.scan_wall['lidar'] > LIDAR_START_FRESH_S
                     or wall - self.lidar_stable_since < LIDAR_START_STABLE_S):
                 self.send()
                 return
             start = self.phases[0]['poses'][0]
-            if (math.dist(self.pose[:2], start[:2]) > .02
-                    or abs(wrap(self.pose[2] - start[2])) > math.radians(.5)):
+            if (math.dist(control_pose[:2], start[:2]) > .02
+                    or abs(wrap(control_pose[2] - start[2])) > math.radians(.5)):
                 self.fail('current odom does not match frozen start pose')
                 return
             self.started = True
@@ -380,9 +564,12 @@ class RealTrial(Node):
             self.last_progress_pose, self.last_progress_wall = self.pose, wall
         # The EKF /odom pose owns both XY and control yaw. Keep raw IMU
         # relative heading as a diagnostic rather than replacing EKF yaw.
-        control_pose = self.pose
         raw_imu_pose = self.imu_control_pose()
         imu_odom_difference_deg = math.degrees(wrap(raw_imu_pose[2]-self.pose[2]))
+        capture_correction = self.localization['correction_at_capture_xyyaw'] if self.localization else (0.,0.,0.)
+        raw_reference_pose = compose(capture_correction, self.pose)
+        imu_reference_pose = compose(capture_correction, raw_imu_pose)
+        diagnostic_imu_yaw = imu_reference_pose[2]
         if abs(imu_odom_difference_deg) > IMU_ODOM_MAX_DISAGREEMENT_DEG:
             self.fail(f'IMU/odom heading disagreement {imu_odom_difference_deg:+.2f} deg')
             return
@@ -390,7 +577,8 @@ class RealTrial(Node):
             self.send()
             if wall - self.braking_since >= .5:
                 e = errors(control_pose, self.target, self.geometry)
-                still = self.twist and abs(self.twist[0]) < .005 and abs(self.twist[1]) < .005
+                still = (self.twist and abs(self.twist[0]) < .005 and abs(self.twist[1]) < .005
+                         and (not self.localization or self.localization_status.get('correction_settled') is True))
                 if (not still or abs(e['gap_m'] - self.geometry['stop_gap']) > .005
                         or abs(e['ey_m']) > self.geometry['max_lateral']
                         or abs(math.degrees(e['yaw_error_rad'])) > self.geometry['max_yaw_deg']):
@@ -404,7 +592,8 @@ class RealTrial(Node):
         if self.stop_at_c and self.c_braking_since is not None:
             self.send()
             e = errors(control_pose, self.target, self.geometry)
-            still = self.twist and abs(self.twist[0]) < .005 and abs(self.twist[1]) < .005
+            still = (self.twist and abs(self.twist[0]) < .005 and abs(self.twist[1]) < .005
+                     and (not self.localization or self.localization_status.get('correction_settled') is True))
             clearance = e['gap_m']-self.geometry['fork_length']
             settling_time = wall-self.c_braking_since
             report_needed = (clearance < self.follow.min_straight_entry_clearance_m
@@ -412,10 +601,11 @@ class RealTrial(Node):
                              or (still and settling_time >= .5))
             if report_needed:
                 print('KẾT QUẢ DỪNG TRƯỚC C: ' + json.dumps(dict(
+                    control_yaw_error_deg=round(math.degrees(e['yaw_error_rad']), 2),
                     imu_yaw_error_deg=round(math.degrees(
-                        errors(raw_imu_pose, self.target, self.geometry)['yaw_error_rad']), 2),
+                        errors(imu_reference_pose, self.target, self.geometry)['yaw_error_rad']), 2),
                     odom_yaw_error_deg=round(math.degrees(
-                        errors(self.pose, self.target, self.geometry)['yaw_error_rad']), 2),
+                        errors(raw_reference_pose, self.target, self.geometry)['yaw_error_rad']), 2),
                     imu_odom_disagreement_deg=round(imu_odom_difference_deg, 2),
                     estimated_lateral_cm=round(e['ey_m']*100, 2),
                     fork_tip_clearance_cm=round(clearance*100, 1),
@@ -432,9 +622,11 @@ class RealTrial(Node):
                     self.state, self.finished = 'C_DIAGNOSTIC_DONE', True
             fork = fork_for_base(control_pose, self.geometry)
             self.rows.append(dict(wall_s=time.time(), state=self.state,
-                                  x_m=self.pose[0], y_m=self.pose[1], yaw_rad=self.pose[2],
-                                  imu_control_yaw_rad=raw_imu_pose[2],
-                                  control_yaw_rad=control_pose[2], heading_source='odom_ekf',
+                                  x_m=control_pose[0], y_m=control_pose[1], yaw_rad=control_pose[2],
+                                  raw_odom_x_m=self.pose[0], raw_odom_y_m=self.pose[1],
+                                  raw_odom_yaw_rad=self.pose[2],
+                                  imu_control_yaw_rad=diagnostic_imu_yaw, raw_imu_yaw_rad=raw_imu_pose[2],
+                                  control_yaw_rad=control_pose[2], heading_source=self.heading_source,
                                   imu_odom_disagreement_deg=imu_odom_difference_deg,
                                   fork_x_m=fork[0], fork_y_m=fork[1], fork_yaw_rad=fork[2],
                                   cmd_v_mps=0., cmd_w_rps=0., **e))
@@ -493,9 +685,11 @@ class RealTrial(Node):
         e = errors(control_pose, self.target, self.geometry)
         fork = fork_for_base(control_pose, self.geometry)
         self.rows.append(dict(wall_s=time.time(), state=self.state,
-                              x_m=self.pose[0], y_m=self.pose[1], yaw_rad=self.pose[2],
-                              imu_control_yaw_rad=raw_imu_pose[2],
-                              control_yaw_rad=control_pose[2], heading_source='odom_ekf',
+                              x_m=control_pose[0], y_m=control_pose[1], yaw_rad=control_pose[2],
+                              raw_odom_x_m=self.pose[0], raw_odom_y_m=self.pose[1],
+                              raw_odom_yaw_rad=self.pose[2],
+                              imu_control_yaw_rad=diagnostic_imu_yaw, raw_imu_yaw_rad=raw_imu_pose[2],
+                              control_yaw_rad=control_pose[2], heading_source=self.heading_source,
                               imu_odom_disagreement_deg=imu_odom_difference_deg,
                               fork_x_m=fork[0], fork_y_m=fork[1], fork_yaw_rad=fork[2],
                               cmd_v_mps=v, cmd_w_rps=w, **e))
@@ -593,7 +787,11 @@ def main():
               flush=True)
         print('  Góc lắp camera so với càng chưa hiệu chuẩn; góc pallet vẫn là ước lượng.', flush=True)
     print(f'  Plan ID: {plan.plan_id}', flush=True)
-    print('  Điều khiển X/Y và góc: /odom (EKF encoder + IMU); IMU thô chỉ đối chiếu.', flush=True)
+    if target.get('localization'):
+        print('  Định vị điều khiển: AMCL LiDAR + bản đồ, kết hợp odom EKF encoder/IMU.', flush=True)
+        print('  Bản đồ: ' + target['localization']['map_file'], flush=True)
+    else:
+        print('  Điều khiển X/Y và góc: /odom (EKF encoder + IMU); IMU thô chỉ đối chiếu.', flush=True)
     print(f"  Tốc độ tối đa: {geometry['max_speed']:.2f} m/s; giảm tốc theo độ cong và khoảng phanh.",
           flush=True)
     if phases[0].get('tracking_controller') == 'pose_feedback':
@@ -627,10 +825,13 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     rclpy.init()
     node = None
+    executor = None
     try:
         monitor_ready()
         read_real_target(args.plan, args.allow_provisional, max_age_s=None)
-        node = RealTrial(plan, args.output, stop_at_c=args.stop_at_c)
+        node = RealTrial(plan, args.output, stop_at_c=args.stop_at_c, control_timer=False)
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
         discovery_deadline = time.monotonic() + 20.
         expected_consumer = [('/r3_collision_monitor', 'geometry_msgs/msg/Twist')]
         while True:
@@ -641,11 +842,10 @@ def main():
                 raise RuntimeError('safe collision monitor is not the sole command consumer '
                                    f'after 20 s: expected {expected_consumer}, found {consumers}')
             node.send()
-            time.sleep(.1)
+            executor.spin_once(timeout_sec=.1)
         node.armed = True
         node.armed_at = time.monotonic()
-        while rclpy.ok() and not node.finished:
-            rclpy.spin_once(node, timeout_sec=.1)
+        run_control_loop(node, executor)
     except KeyboardInterrupt:
         if node:
             node.fail('operator stopped real trial')
@@ -653,7 +853,7 @@ def main():
         if node:
             for _ in range(10):
                 node.send()
-                rclpy.spin_once(node, timeout_sec=.05)
+                executor.spin_once(timeout_sec=.05)
             if node.rows:
                 write_csv(args.output/'executed_odom_base.csv', node.rows)
             diagnostics_report = node.diagnostics.write(args.output)
@@ -661,10 +861,16 @@ def main():
                 'status': node.state, 'reason': node.reason,
                 'plan_id': plan.plan_id, 'odom_samples': len(node.rows),
                 'physical_alignment_verified': False,
-                'heading_source': 'odom_ekf',
+                'heading_source': node.heading_source,
+                'localization': node.localization_status,
                 'odom_imu_diagnostics': diagnostics_report,
                 'final_odom_yaw_error_deg': (
-                    math.degrees(wrap(node.rows[-1]['yaw_rad']-target['pose'][2]))
+                    math.degrees(wrap(node.rows[-1]['raw_odom_yaw_rad'] +
+                        (node.localization['correction_at_capture_xyyaw'][2] if node.localization else 0.)
+                        - target['pose'][2]))
+                    if node.rows else None),
+                'final_control_yaw_error_deg': (
+                    math.degrees(wrap(node.rows[-1]['control_yaw_rad']-target['pose'][2]))
                     if node.rows else None),
                 'pallet_remeasured_at_stop': node.c_verified is not None,
                 'max_imu_odom_disagreement_deg': max(
@@ -676,6 +882,8 @@ def main():
                 'c_rgbd_measurement': node.c_rgbd_report,
                 'lift_commands': 0,
             }, indent=2))
+            executor.remove_node(node)
+            executor.shutdown()
             node.destroy_node()
         rclpy.shutdown()
 

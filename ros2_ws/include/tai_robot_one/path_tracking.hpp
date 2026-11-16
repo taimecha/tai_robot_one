@@ -49,12 +49,14 @@ inline bool canApproachGoalWithoutStationaryTurn(
 
 inline bool terminalReverseCorrectionAllowed(
   double x, double y, double remaining_length, double xy_tolerance,
-  double yaw_error, bool arrived_before)
+  double yaw_error, bool arrived_before, bool allow_new_near_goal = false)
 {
-  // Only correct a small backward drift after actually entering arrival.
-  // Straight retreat preserves the accepted lateral error and final heading.
-  return arrived_before && remaining_length <= 0.15 && x < -xy_tolerance &&
-         std::hypot(x, y) <= 0.15 && std::abs(y) < 0.9 * xy_tolerance &&
+  // Normal profiles require previous arrival. The A profile can explicitly
+  // opt into a new, shorter rear correction. Straight retreat preserves the
+  // accepted lateral error and heading; the caller checks the full corridor.
+  const double limit = arrived_before ? 0.15 : 0.12;
+  return (arrived_before || allow_new_near_goal) && remaining_length <= limit && x < -xy_tolerance &&
+         std::hypot(x, y) <= limit && std::abs(y) < 0.9 * xy_tolerance &&
          std::abs(yaw_error) <= 0.35;
 }
 

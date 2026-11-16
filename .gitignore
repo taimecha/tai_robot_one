@@ -14,3 +14,5 @@ compile_commands.json
 
 # Generated simulation/trial logs, camera captures and trajectory previews.
 /simulation/output/
+# A is a machine/map-specific taught pose, saved explicitly on the real robot.
+/simulation/r3/recognition_A.json

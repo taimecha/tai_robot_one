@@ -22,7 +22,10 @@ from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from r3_core import (R3_PLANNED_C_CLEARANCE_M, FrozenPlan, errors,
-                     real_geometry_mode, validate_phases, validate_axis_lateral_residual)
+                     real_geometry_mode, validate_phases, validate_axis_lateral_residual, compose)
+from r3_localization_contract import localization_spec, checked_status, CorrectionHistory
+from std_msgs.msg import String
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from r3_pallet_obstacles import classify_ranges
 
 
@@ -33,6 +36,7 @@ def read_real_target(path, allow_provisional=False, max_age_s=30.):
     if plan.plan_id != data.get('plan_id'):
         raise ValueError('frozen plan hash mismatch')
     target = json.loads(plan.target_json)
+    localization_spec(target)
     geometry = json.loads(plan.geometry_json)
     phases = json.loads(plan.phases_json)
     config = json.loads(plan.config_json)
@@ -78,6 +82,12 @@ class PalletObstacleFilter(Node):
     def __init__(self, target, geometry):
         super().__init__('r3_pallet_obstacle_filter')
         self.target, self.geometry = target['pose'], geometry
+        self.localization = localization_spec(target)
+        self.localization_status = None
+        self.correction_history = CorrectionHistory()
+        if self.localization:
+            self.create_subscription(String, self.localization.get('control_status_topic','/pallet/r3/localization/status'), self.on_localization,
+                QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.tf = Buffer()
         self.listener = TransformListener(self.tf, self)
         self.received = {'lidar': 0.}
@@ -89,6 +99,15 @@ class PalletObstacleFilter(Node):
         self.create_subscription(LaserScan, '/scan_filtered',
                                  lambda msg: self.on_scan('lidar', msg), qos_profile_sensor_data)
         self.create_timer(.5, self.report)
+
+    def on_localization(self, msg):
+        try:
+            self.localization_status = checked_status(
+                msg.data, self.get_clock().now().nanoseconds*1e-9, self.localization)
+            self.correction_history.add(self.localization_status)
+        except (ValueError, TypeError, KeyError):
+            self.localization_status = None
+            self.correction_history.clear()
 
     def on_scan(self, name, msg):
         now = self.get_clock().now().nanoseconds * 1e-9
@@ -109,10 +128,20 @@ class PalletObstacleFilter(Node):
             self.last_drop[name] = 'nonfinite odom transform'
             return
         yaw = math.atan2(2 * (q.w*q.z + q.x*q.y), 1 - 2 * (q.y*q.y + q.z*q.z))
+        scan_pose = (t.x,t.y,yaw)
+        if self.localization:
+            try:
+                state = checked_status(self.localization_status or {}, now, self.localization)
+                # Transform the raw scan with the applied correction at its
+                # capture stamp, not the newest correction at callback time.
+                scan_pose = compose(self.correction_history.at(stamp), scan_pose)
+            except (ValueError, TypeError, KeyError) as exc:
+                self.last_drop[name] = str(exc)
+                return
         try:
             ranges, pallet, other = classify_ranges(
                 msg.ranges, msg.angle_min, msg.angle_increment,
-                (t.x, t.y, yaw), self.target, self.geometry)
+                scan_pose, self.target, self.geometry)
         except ValueError:
             self.last_drop[name] = 'invalid scan geometry'
             return

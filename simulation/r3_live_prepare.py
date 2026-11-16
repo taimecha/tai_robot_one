@@ -14,16 +14,19 @@ import statistics
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from std_msgs.msg import String
 from detected_pallets_interfaces.msg import PalletTarget
 
-from r3_core import (R3_PLANNED_C_CLEARANCE_M, FrozenPlan, compose, dense, digest,
-                     errors, fork_for_base, goal_base, validate_phases, wrap)
+from r3_core import (R3_PLANNED_C_CLEARANCE_M, FrozenPlan, PlanReferenceError,
+                     compose, dense, digest, errors, fork_for_base, goal_base,
+                     validate_phases, validate_plan_reference, wrap)
 from r3_refine_approach import minimum_jerk_approach
 from r3_sim import simulate, write_csv
+from r3_localization_contract import checked_status
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -156,6 +159,9 @@ def reacquire_needed(status):
 
 
 def build_plan(snapshot, start, geometry, output):
+    # An invalid coordinate contract is independent of curve shape or camera
+    # noise. Reject it before the expensive four-candidate refinement search.
+    validate_plan_reference(snapshot, dict(localization=snapshot.get('localization')))
     target = snapshot['pose']
     start_tip_clearance = errors(start, target, geometry)['gap_m'] - geometry['fork_length']
     if start_tip_clearance <= R3_PLANNED_C_CLEARANCE_M + 1e-6:
@@ -194,6 +200,8 @@ def build_plan(snapshot, start, geometry, output):
                           tracking_controller='curvature feedforward + odom heading and lateral feedback',
                           heading_source='odom_ekf',
                           geometry_hash=digest(geometry))
+            if snapshot.get('localization'):
+                config['localization'] = snapshot['localization']
             plan = FrozenPlan.create(snapshot, geometry, phases, config)
             output.mkdir(parents=True, exist_ok=False)
             (output/'frozen_plan.json').write_text(json.dumps(dict(vars(plan), plan_id=plan.plan_id), indent=2))
@@ -207,6 +215,8 @@ def build_plan(snapshot, start, geometry, output):
                 for p in phases for v in p['poses']])
             write_preview_svg(output/'trajectory.svg', phases, target, geometry)
             return plan, phases, rows
+        except PlanReferenceError:
+            raise
         except ValueError as exc:
             attempts.append(f'C gap {gap:.3f} m: {exc}')
     raise ValueError('no feasible A→C→B path: ' + '; '.join(attempts))
@@ -246,12 +256,15 @@ def write_preview_svg(path, phases, target, geometry):
 
 
 class Capture(Node):
-    def __init__(self):
+    def __init__(self, localization='odom'):
         super().__init__('r3_live_stationary_capture')
         self.status = None
         self.status_wall = 0.
         self.odom = None
         self.odom_stamp = 0.
+        self.localization_mode = localization
+        self.localization_status = None
+        self.control_localization_status = None
         self.samples = deque(maxlen=32)
         self.last_target_wall = 0.
         self.yolo_off_wall = 0.
@@ -259,7 +272,30 @@ class Capture(Node):
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(PalletTarget, '/pallet/target', self.on_target, 10)
-        self.create_subscription(Odometry, '/odom', self.on_odom, qos_profile_sensor_data)
+        pose_topic = '/pallet/r3/localized_odom' if localization == 'amcl' else '/odom'
+        self.create_subscription(Odometry, pose_topic, self.on_odom, qos_profile_sensor_data)
+        if localization == 'amcl':
+            self.create_subscription(String, '/pallet/r3/localization/status',
+                self.on_localization, QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            self.create_subscription(String,'/pallet/r3/control_odom/status',self.on_control_localization,
+                QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
+    def on_control_localization(self,msg):
+        try:
+            self.control_localization_status=checked_status(msg.data,self.get_clock().now().nanoseconds*1e-9)
+        except (ValueError,TypeError,KeyError):
+            self.control_localization_status=None
+
+    def on_localization(self, msg):
+        try:
+            now = self.get_clock().now().nanoseconds*1e-9
+            status = checked_status(msg.data, now)
+            if self.localization_status and status['run_id'] != self.localization_status['run_id']:
+                self.samples.clear()
+            self.localization_status = status
+        except (ValueError, TypeError, KeyError):
+            self.localization_status = None
+            self.samples.clear()
 
     def on_status(self, msg):
         try:
@@ -281,7 +317,8 @@ class Capture(Node):
         now = self.get_clock().now().nanoseconds * 1e-9
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
         norm = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w
-        if (msg.header.frame_id != 'odom' or msg.child_frame_id not in ('base_link', 'base_footprint')
+        expected_frame = 'r3_trial' if self.localization_mode == 'amcl' else 'odom'
+        if (msg.header.frame_id != expected_frame or msg.child_frame_id not in ('base_link', 'base_footprint')
                 or not -.05 <= now-stamp <= .2 or abs(norm-1) > .02
                 or not all(math.isfinite(v) for v in (p.x, p.y, norm,
                     msg.twist.twist.linear.x, msg.twist.twist.angular.z))):
@@ -346,13 +383,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--timeout', type=float, default=90.)
+    parser.add_argument('--localization', choices=('odom', 'amcl'), default='odom')
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout < 0:
         parser.error('timeout must be finite and nonnegative (0 means unlimited)')
     if args.output.exists():
         parser.error('choose a new output directory')
     rclpy.init()
-    node = Capture()
+    node = Capture(args.localization)
     deadline = time.monotonic()+args.timeout if args.timeout else float('inf')
     last_attempt = 0.
     last_error = ''
@@ -376,16 +414,40 @@ def main():
                 continue
             last_attempt = time.monotonic()
             try:
+                localization = None
+                if args.localization == 'amcl':
+                    state = checked_status(node.localization_status or {}, now_ros)
+                    if state.get('correction_settled') is not True:
+                        raise ValueError('waiting for AMCL correction to settle before locking pallet')
+                    external=state.get('external_control_odom') is True
+                    if external:
+                        # Capture the same applied frame used by the actual
+                        # odometry publisher, including a held correction.
+                        state=checked_status(node.control_localization_status or {},now_ros,state)
+                        if state.get('correction_settled') is not True:
+                            raise ValueError('waiting for the applied control correction to settle before locking pallet')
+                    localization = dict(mode='amcl', run_id=state['run_id'], map_file=state['map_file'],
+                        baseline_map_odom=state['baseline_map_odom'],
+                        correction_at_capture_xyyaw=state['correction_xyyaw'])
+                    if external:
+                        localization['control_status_topic']='/pallet/r3/control_odom/status'
                 lateral_calibration = load_axis_lateral_calibration()
                 snapshot, start = snapshot_from_samples(
                     samples, node.status,
                     lateral_residual_m=lateral_calibration['pallet_axis_lateral_residual_m'],
                     lateral_calibration=lateral_calibration)
+                if localization:
+                    snapshot.update(frame_id='r3_trial', localization=localization)
                 plan, phases, rows = build_plan(snapshot, start, provisional_geometry(), args.output)
                 # A hash alone cannot reconstruct a wrong locked target.
                 # Preserve the actual accepted scalar captures and poses too.
                 (args.output/'capture_samples.json').write_text(json.dumps(
                     dict(samples=samples, recognition_session=node.status), indent=2))
+            except PlanReferenceError as exc:
+                print(json.dumps(dict(status='BLOCKED',
+                    reason='Invalid plan frame/reference: '+str(exc),
+                    robot_commands=0), ensure_ascii=False), flush=True)
+                return 2
             except ValueError as exc:
                 if str(exc).startswith('START_TOO_CLOSE_FOR_C:'):
                     print(json.dumps(dict(status='BLOCKED', reason=str(exc),
@@ -417,9 +479,14 @@ def main():
                               last_plan_error=last_error,
                               robot_commands=0), ensure_ascii=False))
         return 2
+    except (KeyboardInterrupt,ExternalShutdownException):
+        print(json.dumps(dict(status='CANCELLED',reason='Recognition stopped by operator',
+                              robot_commands=0),ensure_ascii=False),flush=True)
+        return 130
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

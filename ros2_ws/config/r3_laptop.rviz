@@ -1,0 +1,370 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+- Class: nav2_rviz_plugins/Navigation 2
+  Name: Navigation 2
+- Class: rviz_common/Selection
+  Name: Selection
+- Class: rviz_common/Tool Properties
+  Name: Tool Properties
+- Class: rviz_common/Views
+  Name: Views
+Visualization Manager:
+  Class: ''
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 20
+  Displays:
+  - Class: rviz_default_plugins/Grid
+    Name: Grid
+    Enabled: true
+    Cell Size: 1
+    Plane Cell Count: 30
+  - Class: rviz_default_plugins/MarkerArray
+    Name: AMCL readiness (green/red)
+    Enabled: true
+    Topic:
+      Value: /pallet/r3/localization/markers
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+    Queue Size: 10
+  - Class: rviz_default_plugins/MarkerArray
+    Name: A save readiness below 5 cm / 2 deg
+    Enabled: true
+    Topic:
+      Value: /pallet/r3/localization/a_markers
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+    Queue Size: 10
+  - Class: rviz_default_plugins/Map
+    Name: Saved Map
+    Enabled: true
+    Alpha: 0.7
+    Topic:
+      Value: /map
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+    Color Scheme: map
+  - Class: rviz_default_plugins/RobotModel
+    Name: Robot
+    Enabled: true
+    Description Source: Topic
+    Description Topic:
+      Value: /robot_description
+      Reliability Policy: Reliable
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Depth: 1
+  - Class: rviz_default_plugins/LaserScan
+    Name: LiDAR /scan_filtered
+    Enabled: true
+    Topic:
+      Value: /scan_filtered
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 5
+    Style: Points
+    Size (Pixels): 3
+    Size (m): 0.02
+    Alpha: 1
+    Decay Time: 0
+    Position Transformer: XYZ
+    Color Transformer: FlatColor
+    Color: 255; 80; 30
+    Use Fixed Frame: true
+    Filter size: 30
+  - Class: rviz_default_plugins/LaserScan
+    Name: Camera obstacles /camera/obstacle_scan
+    Enabled: true
+    Topic:
+      Value: /camera/obstacle_scan
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 1
+    Filter size: 1
+    Style: Flat Squares
+    Size (Pixels): 4
+    Size (m): 0.02
+    Alpha: 1
+    Decay Time: 0.75
+    Position Transformer: XYZ
+    Color Transformer: FlatColor
+    Color: 190; 150; 0
+    Min Color: 190; 150; 0
+    Max Color: 190; 150; 0
+    Use Fixed Frame: true
+    Use rainbow: false
+  - Class: rviz_default_plugins/PointCloud2
+    Name: Camera floor aligned cloud - optional bandwidth
+    Enabled: false
+    Topic:
+      Value: /camera/depth/points_nav_floor_corrected
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 1
+    Style: Points
+    Size (Pixels): 2
+    Size (m): 0.015
+    Alpha: 0.8
+    Decay Time: 0
+    Position Transformer: XYZ
+    Color Transformer: FlatColor
+    Color: 190; 150; 0
+    Use Fixed Frame: true
+  - Class: rviz_default_plugins/Image
+    Name: Camera RGB image - optional bandwidth
+    Enabled: false
+    Topic:
+      Value: /camera/color/image_raw
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 1
+    Transport Hint: raw
+    Queue Size: 1
+  - Class: rviz_default_plugins/PoseWithCovariance
+    Name: AMCL map pose and uncertainty
+    Enabled: true
+    Topic:
+      Value: /amcl_pose
+      Reliability Policy: Reliable
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 5
+    Color: 20; 220; 80
+    Alpha: 1
+    Shape: Arrow
+    Covariance:
+      Value: true
+      Position:
+        Alpha: 0.25
+        Color: 20; 220; 80
+        Scale: 1
+      Orientation:
+        Alpha: 0.35
+        Color: 255; 210; 40
+        Color Style: Unique
+        Frame: Local
+        Offset: 1
+        Scale: 1
+  - Class: nav2_rviz_plugins/ParticleCloud
+    Name: AMCL Particles
+    Enabled: true
+    Topic:
+      Value: /particle_cloud
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 5
+    Color: 0; 180; 0
+    Shape: Arrow (Flat)
+    Min Arrow Length: 0.02
+    Max Arrow Length: 0.15
+  - Class: rviz_default_plugins/Odometry
+    Name: Wheel odom (raw)
+    Enabled: false
+    Covariance:
+      Value: false
+    Topic:
+      Value: /base_controller/odom
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 10
+    Shape:
+      Value: Arrow
+      Color: 255; 190; 0
+      Alpha: 1
+      Shaft Length: 0.35
+      Shaft Radius: 0.025
+      Head Length: 0.12
+      Head Radius: 0.06
+    Keep: 1
+    Position Tolerance: 0
+    Angle Tolerance: 0
+  - Class: rviz_default_plugins/Odometry
+    Name: EKF odom (/odom)
+    Enabled: true
+    Covariance:
+      Value: false
+    Topic:
+      Value: /odom
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 10
+    Shape:
+      Value: Arrow
+      Color: 0; 170; 255
+      Alpha: 1
+      Shaft Length: 0.45
+      Shaft Radius: 0.035
+      Head Length: 0.14
+      Head Radius: 0.075
+    Keep: 1
+    Position Tolerance: 0
+    Angle Tolerance: 0
+  - Class: rviz_default_plugins/MarkerArray
+    Name: IMU (/imu via markers)
+    Enabled: false
+    Namespaces:
+      live_imu: true
+    Queue Size: 10
+    Topic:
+      Value: /imu/markers
+      Reliability Policy: Reliable
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 10
+  - Class: rviz_common/Group
+    Name: Global costmap and planning
+    Enabled: true
+    Displays:
+    - Class: rviz_default_plugins/Map
+      Name: Global Costmap
+      Enabled: true
+      Alpha: 0.15
+      Color Scheme: costmap
+      Draw Behind: false
+      Topic:
+        Value: /global_costmap/costmap
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Update Topic:
+        Value: /global_costmap/costmap_updates
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/Path
+      Name: Global Plan - available during navigation
+      Enabled: true
+      Topic:
+        Value: /plan
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Color: 255; 0; 0
+      Line Style: Lines
+      Line Width: 0.03
+      Buffer Length: 1
+    - Class: rviz_default_plugins/Polygon
+      Name: Global robot footprint
+      Enabled: true
+      Color: 0; 255; 0
+      Topic:
+        Value: /global_costmap/published_footprint
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+  - Class: rviz_common/Group
+    Name: Local costmap and obstacle view
+    Enabled: true
+    Displays:
+    - Class: rviz_default_plugins/Map
+      Name: Local Costmap
+      Enabled: true
+      Alpha: 0.55
+      Color Scheme: costmap
+      Draw Behind: false
+      Topic:
+        Value: /local_costmap/costmap
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Update Topic:
+        Value: /local_costmap/costmap_updates
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/Path
+      Name: RPP transformed plan - available during navigation
+      Enabled: true
+      Topic:
+        Value: /received_global_plan
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Color: 0; 80; 255
+      Line Style: Lines
+      Line Width: 0.03
+      Buffer Length: 1
+    - Class: rviz_default_plugins/Polygon
+      Name: Robot Footprint
+      Enabled: true
+      Color: 0; 255; 0
+      Topic:
+        Value: /local_costmap/published_footprint
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+    - Class: rviz_default_plugins/PointStamped
+      Name: RPP lookahead point - available during navigation
+      Enabled: true
+      Topic:
+        Value: /lookahead_point
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Color: 255; 255; 0
+      Radius: 0.035
+      History Length: 1
+  - Class: rviz_default_plugins/TF
+    Name: TF frames - optional
+    Enabled: false
+    Show Arrows: true
+    Show Axes: true
+    Show Names: false
+    Marker Scale: 0.3
+    Frame Timeout: 15
+    Frames:
+      All Enabled: true
+  Tools:
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/FocusCamera
+  - Class: rviz_default_plugins/Measure
+  - Class: rviz_default_plugins/SetInitialPose
+    Topic:
+      Value: /initialpose
+    Covariance x: 0.25
+    Covariance y: 0.25
+    Covariance yaw: 0.06853891909122467
+  - Class: nav2_rviz_plugins/GoalTool
+  - Class: nav2_rviz_plugins/CostmapCostTool
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: map
+      Scale: 65
+      Angle: 0
+      X: 1.7
+      Y: 1.2
+Window Geometry:
+  Width: 1400
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Navigation 2:
+    collapsed: false

@@ -4,6 +4,82 @@
 #include <gtest/gtest.h>
 #include "../src/safe_rotation_rpp.cpp"
 
+class ArrivalGoalChecker : public nav2_core::GoalChecker
+{
+public:
+  void initialize(const rclcpp_lifecycle::LifecycleNode::WeakPtr &, const std::string &,
+    const std::shared_ptr<nav2_costmap_2d::Costmap2DROS>) override {}
+  void reset() override {}
+  bool isGoalReached(const geometry_msgs::msg::Pose &, const geometry_msgs::msg::Pose &,
+    const geometry_msgs::msg::Twist &) override {return false;}
+  bool getTolerances(geometry_msgs::msg::Pose & p, geometry_msgs::msg::Twist & v) override
+  {
+    p.position.x = p.position.y = .03;
+    p.orientation.z = std::sin(2. * tai_robot_one::kPi / 360.);
+    p.orientation.w = std::cos(2. * tai_robot_one::kPi / 360.);
+    v.linear.x = .015; v.angular.z = .02;
+    return true;
+  }
+};
+
+TEST(RearGoalController, PrecisionArrivalBrakesBeforeTheTargetAndDoesNotTurnAroundForFiveCm)
+{
+  setenv("ROS_DOMAIN_ID", "231", 1);
+  rclcpp::init(0, nullptr);
+  auto map = std::make_shared<nav2_costmap_2d::Costmap2DROS>("precision_arrival_map");
+  map->set_parameters({rclcpp::Parameter("plugins", std::vector<std::string>{}),
+    rclcpp::Parameter("global_frame", "map"), rclcpp::Parameter("robot_base_frame", "base_link"),
+    rclcpp::Parameter("resolution", .025), rclcpp::Parameter("width", 6), rclcpp::Parameter("height", 6),
+    rclcpp::Parameter("footprint", "[[0.81,0.13],[0.81,-0.13],[0.41,-0.28],[-0.36,-0.28],[-0.36,0.28],[0.41,0.28]]")});
+  ASSERT_EQ(map->on_configure(rclcpp_lifecycle::State()), nav2_util::CallbackReturn::SUCCESS);
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("precision_arrival_test");
+  auto tf = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+  tf->setUsingDedicatedThread(true);
+  node->declare_parameter("FollowPath.predictive_terminal_braking", true);
+  node->declare_parameter("FollowPath.terminal_command_latency", .25);
+  node->declare_parameter("FollowPath.allow_short_rear_goal_correction", true);
+  node->declare_parameter("FollowPath.allow_reverse_route_tracking", false);
+  node->declare_parameter("FollowPath.terminal_reverse_speed", .10);
+  tai_robot_one::SafeRotationRPP controller;
+  controller.configure(node, "FollowPath", tf, map); controller.activate();
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header.frame_id = "map"; pose.pose.position.x = pose.pose.position.y = 2.;
+  auto update = [&](double yaw) {
+      pose.header.stamp = node->now();
+      pose.pose.orientation.z = std::sin(yaw / 2.); pose.pose.orientation.w = std::cos(yaw / 2.);
+      geometry_msgs::msg::TransformStamped t; t.header = pose.header; t.child_frame_id = "base_link";
+      t.transform.translation.x = t.transform.translation.y = 2.; t.transform.rotation = pose.pose.orientation;
+      tf->setTransform(t, "synthetic", false);
+    };
+  auto route = [&](double x, double y, double yaw) {
+      nav_msgs::msg::Path path; path.header = pose.header;
+      path.poses.push_back(pose);
+      auto goal = pose; goal.pose.position.x = x; goal.pose.position.y = y;
+      goal.pose.orientation.z = std::sin(yaw / 2.); goal.pose.orientation.w = std::cos(yaw / 2.);
+      path.poses.push_back(goal); return path;
+    };
+  ArrivalGoalChecker checker;
+  geometry_msgs::msg::Twist velocity;
+  update(0.); controller.setPlan(route(2., 2., 4. * tai_robot_one::kPi / 180.));
+  EXPECT_GT(controller.computeVelocityCommands(pose, velocity, &checker).twist.angular.z, 0.);
+  update(tai_robot_one::kPi / 180.); velocity.angular.z = .22;
+  EXPECT_DOUBLE_EQ(controller.computeVelocityCommands(pose, velocity, &checker).twist.angular.z, 0.);
+  // A later pose sample must not restart the turn while the base is braking.
+  update(1.5 * tai_robot_one::kPi / 180.);
+  EXPECT_DOUBLE_EQ(controller.computeVelocityCommands(pose, velocity, &checker).twist.angular.z, 0.);
+  controller.reset(); update(0.); velocity = geometry_msgs::msg::Twist{};
+  controller.setPlan(route(1.948, 1.985, .024));
+  auto command = controller.computeVelocityCommands(pose, velocity, &checker);
+  EXPECT_DOUBLE_EQ(command.twist.angular.z, 0.);
+  EXPECT_NEAR(command.twist.linear.x, -.10, 1e-9);
+  unsigned int mx, my;
+  ASSERT_TRUE(map->getCostmap()->worldToMap(1.60, 2., mx, my));
+  map->getCostmap()->setCost(mx, my, nav2_costmap_2d::LETHAL_OBSTACLE);
+  EXPECT_THROW(controller.computeVelocityCommands(pose, velocity, &checker), nav2_core::NoValidControl);
+  controller.deactivate(); controller.cleanup(); map->on_cleanup(rclcpp_lifecycle::State());
+  map.reset(); node.reset(); tf.reset(); rclcpp::shutdown();
+}
+
 TEST(RearGoalController, ReversesWithoutHalfTurnStopsAtToleranceAndChecksRearCollision)
 {
   setenv("ROS_DOMAIN_ID", "231", 1);

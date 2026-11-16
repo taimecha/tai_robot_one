@@ -36,6 +36,7 @@ find_package(behaviortree_cpp QUIET)
 find_package(geometry_msgs REQUIRED)
 find_package(nav2_regulated_pure_pursuit_controller QUIET)
 find_package(nav2_core QUIET)
+find_package(nav2_smac_planner QUIET)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(nav2_msgs REQUIRED)
@@ -48,6 +49,16 @@ if(nav2_regulated_pure_pursuit_controller_FOUND AND nav2_core_FOUND)
   ament_target_dependencies(tai_safe_rotation_rpp
     nav2_regulated_pure_pursuit_controller nav2_core tf2_geometry_msgs pluginlib)
   pluginlib_export_plugin_description_file(nav2_core tai_navigation_plugins.xml)
+endif()
+
+if(nav2_smac_planner_FOUND AND nav2_core_FOUND)
+  add_library(tai_exact_goal_smac_planner SHARED src/exact_goal_smac_planner.cpp)
+  target_include_directories(tai_exact_goal_smac_planner PRIVATE include)
+  ament_target_dependencies(tai_exact_goal_smac_planner
+    nav2_smac_planner nav2_core nav2_costmap_2d nav_msgs geometry_msgs pluginlib)
+  if(NOT TARGET tai_safe_rotation_rpp)
+    pluginlib_export_plugin_description_file(nav2_core tai_navigation_plugins.xml)
+  endif()
 endif()
 
 # Fast DDS is the validated middleware for the current WSL mirrored-network
@@ -121,7 +132,14 @@ if(BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_stop_envelope.py)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_rotation_sweep test/test_rotation_sweep.cpp)
+  ament_add_gtest(test_terminal_braking test/test_terminal_braking.cpp)
+  target_include_directories(test_terminal_braking PRIVATE include)
   target_include_directories(test_rotation_sweep PRIVATE include)
+  if(TARGET tai_exact_goal_smac_planner)
+    ament_add_gtest(test_exact_goal_connector test/test_exact_goal_connector.cpp)
+    target_include_directories(test_exact_goal_connector PRIVATE include)
+    ament_target_dependencies(test_exact_goal_connector nav2_core nav2_costmap_2d nav_msgs geometry_msgs)
+  endif()
   if(TARGET tai_safe_rotation_rpp)
     ament_add_gtest(test_rear_goal_controller test/test_rear_goal_controller.cpp)
     target_include_directories(test_rear_goal_controller PRIVATE include)
@@ -164,7 +182,7 @@ install(
 set(tai_install_targets tai_robot_one_hardware)
 foreach(optional_target
     tai_physics_lidar tai_compute_opposite_spin_bt_node tai_safe_rotation_rpp
-    tai_path_footprint_clear_bt_node)
+    tai_path_footprint_clear_bt_node tai_exact_goal_smac_planner)
   if(TARGET ${optional_target})
     list(APPEND tai_install_targets ${optional_target})
   endif()
@@ -196,6 +214,15 @@ install(
     scripts/test_robot_motion
     scripts/test_nav_round_trip
     scripts/monitor_sim_clearance
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Share the exact per-capture depth geometry with pallet recognition instead
+# of maintaining a second, static-skew obstacle-cloud approximation.
+install(
+  FILES
+    ../camera/detect_astra/scripts/pallet_plane_heading.py
+    ../camera/detect_astra/scripts/pallet_target_geometry.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

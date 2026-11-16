@@ -11,7 +11,7 @@ matplotlib.use('Agg')
 from matplotlib.figure import Figure
 from matplotlib.patches import Polygon
 
-from r3_core import FrozenPlan, errors, fork_for_base, polygons, rectangle, wrap
+from r3_core import FrozenPlan, errors, fork_for_base, polygons, rectangle, wrap, compose
 
 
 def read_rows(path):
@@ -57,8 +57,9 @@ def render(plan_path, trial_dir, output, view='laptop'):
     final_odom_yaw = float(rows[-1]['yaw_rad'])
     final_imu_yaw = float(rows[-1].get('imu_control_yaw_rad') or final_odom_yaw)
     final_control_yaw = float(rows[-1].get('control_yaw_rad') or final_imu_yaw)
+    amcl_control = rows[-1].get('heading_source') == 'amcl_odom_ekf'
     odom_control = rows[-1].get('heading_source') == 'odom_ekf'
-    heading_label = 'odom EKF' if odom_control else 'IMU'
+    heading_label = 'AMCL + odom EKF' if amcl_control else ('odom EKF' if odom_control else 'IMU')
     final_pose = (float(rows[-1]['x_m']), float(rows[-1]['y_m']), final_control_yaw)
     if (not all(math.isfinite(v) for p in odom for v in p)
             or not all(math.isfinite(v) for v in (final_odom_yaw, final_imu_yaw, final_control_yaw))):
@@ -106,7 +107,13 @@ def render(plan_path, trial_dir, output, view='laptop'):
     ax.plot([p[0] for p in odom_xy], [p[1] for p in odom_xy],
             color='#f59e0b', linewidth=2.2, linestyle='--',
             marker='o' if len(odom) == 1 else None,
-            label='Odom ghi khi chạy · tâm xe', zorder=4)
+            label=('AMCL + odom · tâm xe' if amcl_control else 'Odom ghi khi chạy · tâm xe'), zorder=4)
+    if amcl_control:
+        capture_correction = json.loads(plan.target_json)['localization']['correction_at_capture_xyyaw']
+        raw_xy = [pallet_view(compose(capture_correction,
+                  (float(row['raw_odom_x_m']),float(row['raw_odom_y_m']),0.)), target) for row in rows]
+        ax.plot([p[0] for p in raw_xy],[p[1] for p in raw_xy],color='#64748b',linewidth=1.4,
+                linestyle=':',label='Odom encoder + IMU · gắn mốc A',zorder=3)
 
     a, c, b = planned_base[0], phases[-1]['poses'][0], planned_base[-1]
     for name, pose in (('A', a), ('C', c), ('B', b)):

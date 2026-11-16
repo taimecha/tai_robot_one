@@ -4,6 +4,7 @@
 #include <cmath>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 
 #include <nav2_core/controller_exceptions.hpp>
 #include <nav2_regulated_pure_pursuit_controller/regulated_pure_pursuit_controller.hpp>
@@ -12,6 +13,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include "tai_robot_one/rotation_sweep.hpp"
 #include "tai_robot_one/path_tracking.hpp"
+#include "tai_robot_one/terminal_braking.hpp"
 
 namespace tai_robot_one
 {
@@ -29,6 +31,30 @@ public:
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override
   {
     Base::configure(parent, name, tf, costmap_ros);
+    auto node = parent.lock();
+    auto parameter = [&](const std::string & key, const rclcpp::ParameterValue & value) {
+        if (!node->has_parameter(name + "." + key)) {node->declare_parameter(name + "." + key, value);}
+      };
+    parameter("predictive_terminal_braking", rclcpp::ParameterValue(false));
+    parameter("terminal_command_latency", rclcpp::ParameterValue(0.20));
+    parameter("terminal_angular_deceleration", rclcpp::ParameterValue(1.5));
+    parameter("allow_short_rear_goal_correction", rclcpp::ParameterValue(false));
+    parameter("allow_reverse_route_tracking", rclcpp::ParameterValue(true));
+    parameter("terminal_reverse_speed", rclcpp::ParameterValue(0.08));
+    node->get_parameter(name + ".predictive_terminal_braking", predictive_terminal_braking_);
+    node->get_parameter(name + ".terminal_command_latency", terminal_command_latency_);
+    node->get_parameter(name + ".terminal_angular_deceleration", terminal_angular_deceleration_);
+    node->get_parameter(name + ".allow_short_rear_goal_correction", allow_short_rear_goal_correction_);
+    node->get_parameter(name + ".allow_reverse_route_tracking", allow_reverse_route_tracking_);
+    node->get_parameter(name + ".terminal_reverse_speed", terminal_reverse_speed_);
+    if (!std::isfinite(terminal_command_latency_) || terminal_command_latency_ < 0.0 ||
+      !std::isfinite(terminal_angular_deceleration_) || terminal_angular_deceleration_ <= 0.0 ||
+      !std::isfinite(terminal_reverse_speed_) || terminal_reverse_speed_ <= 0.0 || terminal_reverse_speed_ > .10)
+    {
+      throw std::invalid_argument("Invalid terminal braking or bounded reverse parameters");
+    }
+    RCLCPP_INFO(logger_, "Terminal control: predictive braking=%d, latency budget=%.3f s, bounded rear goal=%d",
+      predictive_terminal_braking_, terminal_command_latency_, allow_short_rear_goal_correction_);
     turn_limited_pub_ = parent.lock()->create_publisher<std_msgs::msg::Bool>(
       "/navigation/stationary_turn_limited", rclcpp::QoS(1).reliable().transient_local());
   }
@@ -58,6 +84,8 @@ public:
     aligning_terminal_yaw_ = false;
     terminal_arrival_seen_ = false;
     terminal_slow_turn_ = false;
+    terminal_braking_ = false;
+    terminal_stop_ticks_ = 0;
     rotation_blocked_ = false;
     has_reached_xy_tolerance_ = false;
     // Keep a tripped turn guard across FollowPath retries for the same goal.
@@ -70,7 +98,7 @@ public:
     for (const auto & p : path.poses) {
       poses.push_back({p.pose.position.x, p.pose.position.y, tf2::getYaw(p.pose.orientation)});
     }
-    const bool reverse = shortReversePath(poses);
+    const bool reverse = allow_reverse_route_tracking_ && shortReversePath(poses);
     if (reverse != short_reverse_plan_) {turning_ = false;}
     short_reverse_plan_ = reverse;
     bool new_goal = false;
@@ -100,6 +128,8 @@ public:
       aligning_terminal_yaw_ = false;
       terminal_arrival_seen_ = false;
       terminal_slow_turn_ = false;
+      terminal_braking_ = false;
+      terminal_stop_ticks_ = 0;
       has_reached_xy_tolerance_ = false;
     }
     // A blocked sweep may be retried only after a fresh global plan.
@@ -194,6 +224,25 @@ public:
       terminal_slow_turn_ = std::abs(goal_yaw_error) <= 1.8;
     }
     terminal_arrival_seen_ = terminal_arrival_seen_ || at_goal;
+    if (predictive_terminal_braking_ && terminal_braking_) {
+      // Keep zero through real braking and feedback delivery. Do not turn
+      // back the other way on a still-moving chassis because one TF sample
+      // has crossed the heading target.
+      if (std::abs(velocity.angular.z) > .02 ||
+        std::hypot(velocity.linear.x, velocity.linear.y) > .015)
+      {
+        terminal_stop_ticks_ = 0;
+      } else {
+        ++terminal_stop_ticks_;
+      }
+      if (terminal_stop_ticks_ < 4) {
+        geometry_msgs::msg::TwistStamped stop;
+        stop.header = pose.header;
+        return stop;
+      }
+      terminal_braking_ = false;
+      turning_ = false;
+    }
     if (at_goal && std::abs(goal_yaw_error) > yaw_tolerance) {
       aligning_terminal_yaw_ = true;
     }
@@ -221,7 +270,7 @@ public:
     }
     if (!aligning_terminal_yaw_ && terminalReverseCorrectionAllowed(
         end.position.x, end.position.y, remaining_length, xy_tolerance,
-        goal_yaw_error, terminal_arrival_seen_))
+        goal_yaw_error, terminal_arrival_seen_, allow_short_rear_goal_correction_))
     {
       turning_ = false;
       geometry_msgs::msg::TwistStamped command;
@@ -239,7 +288,7 @@ public:
           throw nav2_core::NoValidControl("Terminal reverse correction corridor blocked");
         }
       }
-      command.twist.linear.x = -std::min(0.08, params_->desired_linear_vel);
+      command.twist.linear.x = -std::min(terminal_reverse_speed_, params_->desired_linear_vel);
       if (collision_checker_->isCollisionImminent(
           pose, command.twist.linear.x, 0.0, retreat))
       {
@@ -315,11 +364,24 @@ public:
       // below the normal heading-alignment rate.
       constexpr double kMinimumLoadedAngularSpeed = 0.22;
       constexpr double kTerminalAngularLimit = 0.24;
-      const bool terminal_turn = terminal_slow_turn_ && remaining_length <= 0.25 &&
+      const bool terminal_turn = (terminal_slow_turn_ || predictive_terminal_braking_) && remaining_length <= 0.25 &&
         std::hypot(end.position.x, end.position.y) <= 0.25;
-      const double angular_limit = terminal_turn ?
+      if (predictive_terminal_braking_ && terminal_turn &&
+        shouldBrakeTerminalTurn(remaining_, velocity.angular.z,
+          terminal_command_latency_, terminal_angular_deceleration_))
+      {
+        terminal_braking_ = true;
+        terminal_stop_ticks_ = 0;
+        RCLCPP_INFO(logger_, "Braking terminal turn early: remaining %.2f deg, measured %.3f rad/s",
+          remaining_ * 180.0 / kPi, velocity.angular.z);
+        return command;
+      }
+      double angular_limit = terminal_turn ?
         std::min(params_->rotate_to_heading_angular_vel, kTerminalAngularLimit) :
         params_->rotate_to_heading_angular_vel;
+      if (predictive_terminal_braking_ && terminal_turn) {
+        angular_limit = std::min(angular_limit, kMinimumLoadedAngularSpeed);
+      }
       double angular = std::copysign(
         std::min(angular_limit,
         std::sqrt(2.0 * params_->max_angular_accel * std::abs(remaining_))), remaining_);
@@ -409,6 +471,14 @@ private:
   bool aligning_terminal_yaw_{false};
   bool terminal_arrival_seen_{false};
   bool terminal_slow_turn_{false};
+  bool predictive_terminal_braking_{false};
+  bool terminal_braking_{false};
+  int terminal_stop_ticks_{0};
+  double terminal_command_latency_{0.20};
+  double terminal_angular_deceleration_{1.5};
+  bool allow_short_rear_goal_correction_{false};
+  bool allow_reverse_route_tracking_{true};
+  double terminal_reverse_speed_{0.08};
   bool rotation_blocked_{false};
   bool turn_limit_exceeded_{false};
   bool have_goal_{false};

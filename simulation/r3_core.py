@@ -238,6 +238,26 @@ def validate_phases(phases, target, g):
         raise ValueError('curvature discontinuity requires stopped phase boundary')
 
 
+class PlanReferenceError(ValueError):
+    """A deterministic frame/run mismatch cannot be repaired by more images."""
+
+
+def validate_plan_reference(snapshot, config):
+    if (snapshot.get('frame_id') not in ('odom', 'r3_trial')
+            or snapshot.get('feature') != 'front_entry_corridor_center'):
+        raise PlanReferenceError('target must be front entry center in odom or validated r3_trial')
+    # The AMCL bridge supplies a bounded trial frame to both capture and
+    # tracking. Keep that identity rather than relabelling its coordinates
+    # as raw odom. Import here because the contract shares core geometry.
+    from r3_localization_contract import localization_spec
+    try:
+        spec = localization_spec(snapshot)
+    except (ValueError, TypeError) as exc:
+        raise PlanReferenceError(str(exc)) from exc
+    if (config.get('localization') or None) != spec:
+        raise PlanReferenceError('localization metadata differs between target and plan')
+
+
 @dataclass(frozen=True)
 class FrozenPlan:
     target_json: str
@@ -247,8 +267,7 @@ class FrozenPlan:
 
     @classmethod
     def create(cls, snapshot, geometry, phases, config):
-        if snapshot['frame_id'] != 'odom' or snapshot['feature'] != 'front_entry_corridor_center':
-            raise ValueError('target must be front entry center in odom')
+        validate_plan_reference(snapshot, config)
         validate_phases(phases, snapshot['pose'], geometry)
         return cls(*(json.dumps(v, sort_keys=True, allow_nan=False) for v in (snapshot, geometry, phases, config)))
 

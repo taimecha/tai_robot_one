@@ -9,6 +9,7 @@ import time
 
 from r3_core import (R3_PLANNED_C_CLEARANCE_M, FrozenPlan, errors,
                      real_geometry_mode, validate_phases, validate_axis_lateral_residual)
+from r3_localization_contract import localization_spec
 
 
 def inspect_plan(path, allow_provisional=False):
@@ -30,6 +31,9 @@ def inspect_plan(path, allow_provisional=False):
     try:
         validate_phases(phases, target['pose'], geometry)
         validate_axis_lateral_residual(target, phases[0]['poses'][0])
+        spec = localization_spec(target)
+        if spec and config.get('localization') != spec:
+            raise ValueError('localization metadata differs between target and plan')
     except (ValueError, KeyError, TypeError, IndexError) as exc:
         blockers.append(f'Path/geometry validation failed: {exc}')
 
