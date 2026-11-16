@@ -306,8 +306,9 @@ class RecognitionGoalTest(unittest.TestCase):
             definitions=launch.navigation_actions(None)
         smoother=next(node for node in definitions if isinstance(node,dict)
                       and node['package']=='nav2_velocity_smoother')
-        self.assertIn(('cmd_vel','cmd_vel_nav'),smoother['remappings'])
-        self.assertTrue(all(isinstance(node,dict) for node in definitions))
+        self.assertIn(('cmd_vel','cmd_vel_nav_checked'),smoother['remappings'])
+        self.assertEqual(sum(isinstance(node,launch.ExecuteProcess) for node in definitions),1)
+        self.assertTrue(all(isinstance(node,(dict,launch.ExecuteProcess)) for node in definitions))
 
     def test_serialized_parameters_allow_jazzy_bt_navigator_to_start(self):
         # Construct only the unconfigured BT process in an isolated domain.

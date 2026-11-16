@@ -23,7 +23,6 @@ from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from lifecycle_msgs.msg import State
 from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav2_msgs.msg import ParticleCloud
@@ -38,6 +37,7 @@ from r3_scan_map_check import ScanMapCheck, LIVE_SCAN_MAX_SAMPLES,validate_recog
 from r3_stationary_localization import StationaryEvidence
 from r3_amcl_observation_pair import validate_observation_pair
 from r3_amcl_quality import concentrated_particle_support,validate_runtime_particles
+from r3_wait_localization_active import LifecyclePoll, readiness as lifecycle_readiness
 
 
 FRAME = 'r3_trial'
@@ -182,9 +182,13 @@ class GlobalParticleGate:
 
 class TrialCorrection:
     """Pure state machine: one baseline, bounded correction, no stale fallback."""
-    def __init__(self, *, bound_total=True):
+    def __init__(self, *, bound_total=True, recover_jumps=False):
         self.baseline = None
         self.bound_total = bound_total
+        self.recover_jumps = recover_jumps
+        self.navigation_recovery = dict(hold_commands=False)
+        self.recovery_scans = deque(maxlen=32)
+        self.last_jump = None
         self.target = self.applied = (0.,0.,0.)
         self.last_transform = None
         self.amcl_stamp = None
@@ -194,7 +198,59 @@ class TrialCorrection:
         self.measurement_ok = False
         self.reason = 'waiting for fresh AMCL observations'
 
-    def accept(self, transform, covariance, stamp, now):
+    def recover_navigation_jump(self, transform, stamp, now, scan):
+        """Validate a candidate with distinct live scans, retaining its AMCL stamp.
+
+        A stopped AMCL need not publish another posterior. Repeated callbacks
+        for one paired posterior may therefore supply new scan evidence, but
+        repeated scan stamps cannot count as independent checks.
+        """
+        state = self.navigation_recovery
+        if not state['hold_commands']:
+            state.update(hold_commands=True, started_ros_s=now,
+                         previous_map_odom_xyyaw=list(self.last_transform),
+                         candidate_map_odom_xyyaw=list(transform),
+                         previous_amcl_stamp_s=self.amcl_stamp,
+                         candidate_amcl_stamp_s=stamp)
+            self.recovery_scans.clear()
+        candidate = state['candidate_map_odom_xyyaw']
+        if (math.dist(candidate[:2], transform[:2]) > .03
+                or abs(wrap(candidate[2]-transform[2])) > math.radians(1.)):
+            self.recovery_scans.clear()
+            state['candidate_map_odom_xyyaw'] = list(transform)
+        state['candidate_amcl_stamp_s'] = stamp
+        try:
+            if not isinstance(scan, dict):
+                raise ValueError('waiting for candidate LiDAR/map agreement')
+            if scan.get('ready') is not True:
+                raise ValueError(scan.get('reason', 'candidate LiDAR/map fit is not ready'))
+            validate_recognition_scan_match(scan)
+            scan_stamp = scan.get('scan_stamp_s')
+            if (not isinstance(scan_stamp, (int, float)) or not math.isfinite(scan_stamp)
+                    or not -.05 <= now-scan_stamp <= SCAN_MAX_AGE_S):
+                raise ValueError('candidate LiDAR scan is stale')
+            if (not self.recovery_scans or scan_stamp > self.recovery_scans[-1]):
+                if self.recovery_scans and scan_stamp-self.recovery_scans[-1] > SCAN_MAX_AGE_S:
+                    self.recovery_scans.clear()
+                self.recovery_scans.append(scan_stamp)
+        except ValueError as exc:
+            self.recovery_scans.clear()
+            state['reason'] = str(exc)
+            self.reason = 'navigation correction held: '+str(exc)
+            state.update(distinct_scan_count=0, scan_span_s=0.)
+            return False
+        span = self.recovery_scans[-1]-self.recovery_scans[0]
+        state.update(distinct_scan_count=len(self.recovery_scans), scan_span_s=span,
+                     scan_map_fit=dict(scan), original_amcl_stamp_preserved=True)
+        if len(self.recovery_scans) < 3 or span < .5-1e-9:
+            self.reason = 'navigation correction held: waiting for three matching scans spanning 0.5 seconds'
+            state['reason'] = self.reason
+            return False
+        state.update(hold_commands=False, recovered_ros_s=now,
+                     reason='candidate correction validated by fresh distinct LiDAR scans')
+        return True
+
+    def accept(self, transform, covariance, stamp, now, *, navigation_scan=None):
         if self.fault:
             return False
         if self.amcl_stamp is not None and stamp <= self.amcl_stamp:
@@ -216,7 +272,21 @@ class TrialCorrection:
             return False
         if self.last_transform is not None:
             jump = compose(inverse(self.last_transform), transform)
-            if math.hypot(*jump[:2]) > .15 or abs(jump[2]) > math.radians(5.):
+            jumped = math.hypot(*jump[:2]) > .15 or abs(jump[2]) > math.radians(5.)
+            if jumped and (self.last_jump is None
+                    or self.last_jump['previous_amcl_stamp_s'] != self.amcl_stamp
+                    or self.last_jump['candidate_amcl_stamp_s'] != stamp
+                    or self.last_jump['candidate_map_odom_xyyaw'] != list(transform)):
+                self.last_jump = dict(previous_map_odom_xyyaw=list(self.last_transform),
+                    candidate_map_odom_xyyaw=list(transform),
+                    previous_amcl_stamp_s=self.amcl_stamp, candidate_amcl_stamp_s=stamp,
+                    translation_m=math.hypot(*jump[:2]), yaw_deg=math.degrees(jump[2]),
+                    observed_ros_s=now)
+            if (self.recover_jumps and self.baseline is not None
+                    and (jumped or self.navigation_recovery['hold_commands'])):
+                if not self.recover_navigation_jump(transform, stamp, now, navigation_scan):
+                    return False
+            elif jumped:
                 if self.baseline is None:
                     # Global search can move between hypotheses before it
                     # converges. Restart the stable window; do not latch a
@@ -282,7 +352,8 @@ class AmclTrialBridge(Node):
         self.continuous_localization=bool(getattr(args,'continuous_localization',False) or self.navigation_monitor)
         self.run_id = str(uuid.uuid4())
         self.map_file = str(args.map.resolve())
-        self.correction = TrialCorrection(bound_total=not self.navigation_monitor)
+        self.correction = TrialCorrection(bound_total=not self.navigation_monitor,
+                                          recover_jumps=self.navigation_monitor)
         self.raw_odom = None
         self.odom_stamp = self.scan_stamp = None
         self.map_received = False
@@ -347,6 +418,9 @@ class AmclTrialBridge(Node):
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.))
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.state_client = self.create_client(GetState, '/amcl/get_state')
+        self.state_poll = LifecyclePoll({'amcl':self.state_client},poll_period_s=.5,
+                                        recreate_client=self.recreate_state_client)
+        self.last_state_error = None
         self.nomotion_client = self.create_client(Empty, '/request_nomotion_update')
         self.global_client = self.create_client(Empty, '/reinitialize_global_localization')
         reliable = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -414,7 +488,7 @@ class AmclTrialBridge(Node):
             raise ValueError('trial handoff AMCL uncertainty requires <5 cm / 2 deg')
         metrics = snapshot['particle_metrics']
         validate_runtime_particles(metrics)
-        for topic in ('/cmd_vel_nav','/cmd_vel_localized','/cmd_vel_smoothed','/cmd_vel_safe'):
+        for topic in ('/cmd_vel_nav','/cmd_vel_nav_checked','/cmd_vel_localized','/cmd_vel_smoothed','/cmd_vel_safe'):
             publishers = self.get_publishers_info_by_topic(topic)
             if publishers:
                 owners = ', '.join(getattr(endpoint,'node_name','unknown') for endpoint in publishers)
@@ -724,16 +798,27 @@ class AmclTrialBridge(Node):
                 return candidate_stamp,candidate_particles,proof
             raise latest_issue
 
+    def recreate_state_client(self,name,client):
+        self.destroy_client(client)
+        self.state_client=self.create_client(GetState,'/amcl/get_state')
+        return self.state_client
+
     def poll_services(self, wall):
-        if self.state_future is not None and self.state_future.done():
-            try:
-                self.active = self.state_future.result().current_state.id == State.PRIMARY_STATE_ACTIVE
-            except Exception:
-                self.active = False
-            self.state_future = None
-        if wall >= self.next_state and self.state_future is None and self.state_client.service_is_ready():
-            self.state_future = self.state_client.call_async(GetState.Request())
-            self.next_state = wall+.5
+        # A lifecycle read is idempotent. Drop a lost response after two
+        # seconds and retry rather than leaving startup behind one forever-
+        # pending future. Recreate the client after repeated transport failures.
+        self.state_poll.clients['amcl']=self.state_client
+        self.state_poll.next_poll['amcl']=self.next_state
+        self.state_poll.tick(wall)
+        self.next_state=self.state_poll.next_poll['amcl']
+        pending=self.state_poll.pending.get('amcl')
+        self.state_future=pending[0] if pending is not None else None
+        if self.state_poll.states:
+            self.active,state_reason=lifecycle_readiness(self.state_poll.states,wall,names=('amcl',))
+            state_error=None if self.active else state_reason
+            if state_error is not None and state_error!=self.last_state_error:
+                self.get_logger().warn('AMCL lifecycle check: '+state_error)
+            self.last_state_error=state_error
         if (self.global_localization and self.active and self.map_received
                 and not self.global_requested and self.global_client.service_is_ready()):
             self.global_future=self.global_client.call_async(Empty.Request())
@@ -829,6 +914,7 @@ class AmclTrialBridge(Node):
             self.next_nomotion = wall+.5
 
     def process_pending(self, now):
+        navigation_monitor = getattr(self, 'navigation_monitor', False)
         for _ in range(len(self.pending)):
             msg = self.pending.popleft()
             stamp = self.stamp(msg)
@@ -836,6 +922,12 @@ class AmclTrialBridge(Node):
                     and stamp<self.global_requested_ros_s):
                 continue
             if self.correction.amcl_stamp is not None and stamp <= self.correction.amcl_stamp:
+                continue
+            recovery = self.correction.navigation_recovery
+            if (navigation_monitor and recovery['hold_commands']
+                    and stamp < recovery['candidate_amcl_stamp_s']):
+                # Once a newer paired posterior is being checked, retrying an
+                # older queued candidate must not reset the consistency window.
                 continue
             if now-stamp > AMCL_MAX_AGE_S:
                 if getattr(self,'continuous_localization',False) and not self.pending:
@@ -899,7 +991,28 @@ class AmclTrialBridge(Node):
                     self.correction.window.clear()
                     self.pending_issue=self.scan_match.get('reason','waiting for initial scan-map fit')
                     continue
-            self.correction.accept(pose, msg.pose.covariance, stamp, now)
+            fit = None
+            if (navigation_monitor and self.correction.last_transform is not None
+                    and (self.correction.navigation_recovery['hold_commands']
+                         or math.dist(pose[:2], self.correction.last_transform[:2]) > .15
+                         or abs(wrap(pose[2]-self.correction.last_transform[2])) > math.radians(5.))):
+                fit = self.score_scan_fit(now, pose)
+            previous_jump = self.correction.last_jump
+            self.correction.accept(pose, msg.pose.covariance, stamp, now, navigation_scan=fit)
+            event = self.correction.last_jump
+            def event_key(value):
+                return ((value['previous_amcl_stamp_s'], value['candidate_amcl_stamp_s'],
+                         tuple(value['candidate_map_odom_xyyaw'])) if value is not None else None)
+            if event is not None and event_key(event) != event_key(previous_jump):
+                self.correction.last_jump.update(odom_at_amcl_capture_xyyaw=list(odom_base),
+                    tf_query_stamp_s=stamp,
+                    tf_returned_stamp_s=(self.stamp(transform) if
+                        getattr(getattr(transform, 'header', None), 'stamp', None) is not None else None),
+                    run_id=self.run_id, map_file=self.map_file)
+                self.get_logger().warn('AMCL map update event: '+json.dumps(self.correction.last_jump))
+            if navigation_monitor and self.correction.navigation_recovery['hold_commands']:
+                self.pending.append(msg)
+                self.pending_issue = self.correction.reason
             if (getattr(self,'continuous_localization',False)
                     and self.correction.measurement_ok and not self.correction.fault):
                 self.latest_observation=(stamp,pose)
@@ -1122,7 +1235,8 @@ class AmclTrialBridge(Node):
             stationary_cached=cached,motion_predicted=predicted,
             external_odom=self.external_control_odom and not self.navigation_monitor)
         if not self.active or not self.map_received:
-            ready,reason = False,'waiting for active AMCL and map; set initial pose in RViz or CLI'
+            ready,reason = False,(self.last_state_error or
+                'waiting for active AMCL and map; set initial pose in RViz or CLI')
         if self.pending_issue and not (self.continuous_localization and (cached or live or predicted)):
             ready,reason = False,self.pending_issue
         if self.global_localization:
@@ -1166,6 +1280,10 @@ class AmclTrialBridge(Node):
                     odom_xyyaw=planar_pose(self.raw_odom.pose.pose.position,self.raw_odom.pose.pose.orientation),
                     source_amcl_stamp_s=self.stationary_snapshot['amcl_stamp_s'],
                     map_signature=self.map_signature)
+        if not self.active and self.last_state_error is not None:
+            # Do not misreport a transport failure as a map/particle failure
+            # after the independent geometric gates above have run.
+            ready,reason=False,self.last_state_error
         if ready:
             applied = self.correction.step(dt)
             if not self.stationary_inspection and not self.navigation_monitor and not self.external_control_odom:
@@ -1210,7 +1328,10 @@ class AmclTrialBridge(Node):
         status['stationary_snapshot']=self.stationary_snapshot
         status['pending_observation_issue']=self.pending_issue
         status['localization_fault']=self.correction.fault or self.global_fault
+        status['map_update_event']=self.correction.last_jump
+        status['navigation_recovery']=dict(self.correction.navigation_recovery)
         status['refresh_conditions']=self.refresh_conditions
+        status['lifecycle_services']=self.state_poll.diagnostics(wall)
         # Distinguish delayed delivery from a posterior waiting for capture-
         # time TF/particle pairing. These timestamps are diagnostics only;
         # they never promote an unvalidated observation to a usable pose.

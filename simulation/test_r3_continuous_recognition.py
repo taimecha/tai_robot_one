@@ -514,13 +514,16 @@ class ContinuousRecognitionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'occupancy map changed'):
             self.node.monitor_navigation_session()
 
-    def test_native_travel_keeps_large_map_correction_jump_fatal(self):
+    def test_native_travel_keeps_goal_after_bridge_validates_a_map_update(self):
         self.arm_native_navigation()
         self.node.stationary_snapshot=copy.deepcopy(self.snapshot)
         self.node.stationary_snapshot['amcl_stamp_s']+=1.
         self.node.stationary_snapshot['map_odom_xyyaw'][0]+=.16
-        with self.assertRaisesRegex(ValueError,'jumped'):
-            self.node.monitor_navigation_session()
+        self.node.stationary_status['navigation_recovery']=dict(hold_commands=False,
+            distinct_scan_count=3,scan_span_s=.5)
+        self.node.monitor_navigation_session()
+        self.assertEqual(self.node.last_map_odom,
+                         tuple(self.node.stationary_snapshot['map_odom_xyyaw']))
 
     def test_active_native_action_does_not_repeat_parked_scan_scoring(self):
         self.arm_native_navigation()

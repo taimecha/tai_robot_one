@@ -158,8 +158,16 @@ class FixedPlanFollower:
     approach_brake_m = .05
     alignment_done_deg = .25
     alignment_settle_s = .30
-    def __init__(self, phases, target, geometry):
+    c_position_tolerance_m = .02
+    c_heading_tolerance_deg = 2.
+    c_stop_trigger_m = .005
+    c_command_latency_s = .20
+
+    def __init__(self, phases, target, geometry, approach_only=False):
         self.phases, self.target, self.g = phases, target, geometry
+        self.approach_only = approach_only
+        if approach_only and (not phases or phases[0]['type'] != 'APPROACH'):
+            raise ValueError('arrival at C requires an initial APPROACH phase')
         self.phase = 0
         self.state = 'PREVIEW_WAIT'
         self.follower = None
@@ -196,7 +204,7 @@ class FixedPlanFollower:
         if obstacle or not odom_valid:
             self.state = 'STOP_LATCHED'
             self.reason = 'obstacle stop' if obstacle else 'invalid odom'
-        if self.state in ('PREVIEW_WAIT', 'STOP_LATCHED', 'STOPPED'):
+        if self.state in ('PREVIEW_WAIT', 'STOP_LATCHED', 'STOPPED', 'C_REACHED'):
             return 0., 0.
         if self.align_goal is not None:
             if abs(wrap(self.align_goal-pose[2])) < math.radians(self.alignment_done_deg):
@@ -249,6 +257,16 @@ class FixedPlanFollower:
         end = phase['poses'][-1]
         dx, dy = end[0]-pose[0], end[1]-pose[1]
         remaining = dx*math.cos(end[2])+dy*math.sin(end[2])
+        if self.approach_only:
+            # C is a staging pose outside the pallet. The insertion-grade
+            # lateral gate belongs to C->B, not to the approach's last 12 cm.
+            if e['gap_m']-self.g['fork_length'] < self.min_straight_entry_clearance_m:
+                self.state, self.reason = 'STOP_LATCHED', 'fork-tip clearance lost approaching C'
+                return 0., 0.
+            if remaining <= self.c_stop_trigger_m:
+                self.v = self.w = self.follower.v = 0.
+                self.state = 'C_REACHED'
+                return 0., 0.
         if phase['type'] == 'STRAIGHT':
             if abs(e['ey_m']) > self.g['max_lateral'] or abs(e['yaw_error_rad']) > math.radians(self.g['max_yaw_deg']):
                 self.state, self.reason = 'STOP_LATCHED', 'terminal yaw/lateral limit exceeded'
@@ -256,7 +274,7 @@ class FixedPlanFollower:
         if remaining < -self.endpoint_tolerance_m:
             self.state, self.reason = 'STOP_LATCHED', 'phase endpoint overshot'
             return 0., 0.
-        if (phase['type'] == 'APPROACH' and self.phase+1 < len(self.phases)
+        if (not self.approach_only and phase['type'] == 'APPROACH' and self.phase+1 < len(self.phases)
                 and self.phases[self.phase+1]['type'] == 'STRAIGHT'
                 and remaining <= self.approach_brake_m):
             # Stop before C so Pure Pursuit cannot chase millimetres of
@@ -329,7 +347,16 @@ class FixedPlanFollower:
         # Brake by available deceleration. A linear remaining-distance cap
         # drove the real robot below 1 mm/s near C, where its motors stalled.
         # The endpoint check above still sends exact zero at the odom target.
-        v = min(v, math.sqrt(2*self.g['acceleration']*max(0., remaining)))
+        if self.approach_only:
+            # Reserve the measured command pipeline delay as well as braking
+            # distance; keep the terminal speed high enough to reach C rather
+            # than exponentially creeping toward an unreachable zero.
+            a = self.g['acceleration']
+            budget = max(0., remaining)
+            v = min(v, math.sqrt((a*self.c_command_latency_s)**2+2*a*budget)
+                    - a*self.c_command_latency_s)
+        else:
+            v = min(v, math.sqrt(2*self.g['acceleration']*max(0., remaining)))
         # Same PP curvature, with speed profiling applied consistently to omega.
         tx, ty, _, _ = self.follower.path[min(len(self.follower.path)-1, self.follower.index+12)]
         dist = math.hypot(tx-pose[0], ty-pose[1])
@@ -344,7 +371,11 @@ class FixedPlanFollower:
                 ahead += math.dist(path[j-1][:2], path[j][:2])
             curve_speed = min(self.g['max_speed'], .8*self.g['max_omega']/max(self.curvature[j], 1e-9))
             v = min(v, math.sqrt(curve_speed**2+2*self.g['acceleration']*ahead))
-        v = min(v, .8*self.g['max_omega']/max(abs(kappa), 1e-9))
+        if not (self.approach_only and phase.get('tracking_controller') == 'pose_feedback'):
+            # Only Pure Pursuit commands this point-chasing curvature. Near
+            # C its endpoint curvature can diverge despite small tangent
+            # feedback, unnecessarily starving the actual drive of speed.
+            v = min(v, .8*self.g['max_omega']/max(abs(kappa), 1e-9))
         # Profiling may ask for a sharper slowdown than the actuator allows.
         # Honor the existing acceleration/deceleration limit and let steering
         # saturation/error checks report any infeasible tracking transition.
@@ -367,7 +398,7 @@ class FixedPlanFollower:
             desired_w = v*signed_curvature - 2.*math.sin(heading) - 16.*v*lateral
             # The same feedback law runs through the straight lead-in, so
             # lateral feedback is not discarded at its boundary.
-            if (phase['type'] == 'APPROACH'
+            if (not self.approach_only and phase['type'] == 'APPROACH'
                     and remaining <= phase.get('straight_lead_in_m', 0.)
                     and abs(e['ey_m']) > self.g['max_lateral']):
                 self.state, self.reason = 'STOP_LATCHED', 'straight lead-in lateral limit exceeded'
@@ -379,7 +410,7 @@ class FixedPlanFollower:
             # even after yaw reaches the pallet axis, reversing the final
             # heading. Hold the terminal heading here instead. A large
             # lateral miss cannot be repaired safely beside the pallet.
-            if abs(e['ey_m']) > self.g['max_lateral']:
+            if not self.approach_only and abs(e['ey_m']) > self.g['max_lateral']:
                 self.state, self.reason = 'STOP_LATCHED', 'straight lead-in lateral limit exceeded'
                 return 0., 0.
             desired_w = 1.2*wrap(end[2]-pose[2])

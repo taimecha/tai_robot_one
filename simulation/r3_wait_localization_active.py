@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Read-only, bounded wait for map_server and AMCL lifecycle activation."""
+"""Bounded, retrying read-only lifecycle checks before navigation is allowed."""
 import argparse
 import math
+from pathlib import Path
 import time
 
 import rclpy
 from lifecycle_msgs.srv import GetState
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
 
 NAMES=('map_server','amcl')
 REQUEST_TIMEOUT_S=2.
+STARTUP_FAILURE_MARKERS=('Failed to bring up all requested nodes',
+                         'Failed to change state for node:')
 
 
 def readiness(states, now, max_age_s=2.5, *, names=NAMES):
@@ -28,11 +32,37 @@ def readiness(states, now, max_age_s=2.5, *, names=NAMES):
 
 
 class LifecyclePoll:
-    def __init__(self, clients):
+    def __init__(self, clients, *, poll_period_s=.25, recreate_client=None):
         self.clients=clients
+        self.poll_period_s=poll_period_s
+        self.recreate_client=recreate_client
         self.states={}
         self.pending={}
         self.next_poll={name:0. for name in clients}
+        self.failures={name:0 for name in clients}
+        self.timeouts={name:0 for name in clients}
+        self.recreated={name:0 for name in clients}
+
+    def failed(self,name,wall,reason):
+        self.states[name]=dict(error=reason,stamp=wall)
+        self.failures[name]+=1
+        self.next_poll[name]=wall+self.poll_period_s
+        if self.recreate_client is not None and self.failures[name]>=2:
+            try:
+                self.clients[name]=self.recreate_client(name,self.clients[name])
+            except Exception as exc:
+                self.states[name]['error']+='; client recreation failed: '+str(exc)
+            else:
+                self.recreated[name]+=1
+                self.failures[name]=0
+
+    def diagnostics(self,wall):
+        return {name:dict(self.states.get(name,{}),
+                         request_pending=name in self.pending,
+                         request_age_s=(max(0.,wall-self.pending[name][1])
+                                        if name in self.pending else None),
+                         request_timeouts=self.timeouts[name],client_recreations=self.recreated[name])
+                for name in self.clients}
 
     def tick(self, wall):
         for name in self.clients:
@@ -44,30 +74,48 @@ class LifecyclePoll:
                         del self.pending[name]
                         response=future.result()
                         self.states[name]=dict(id=response.current_state.id,stamp=wall)
-                        self.next_poll[name]=wall+.25
+                        self.failures[name]=0
+                        self.next_poll[name]=wall+self.poll_period_s
                     elif wall-sent>=REQUEST_TIMEOUT_S:
                         del self.pending[name]
                         client.remove_pending_request(future)
-                        self.states[name]=dict(error='get_state request timed out')
-                        self.next_poll[name]=wall+.25
+                        if hasattr(future,'cancel'):
+                            future.cancel()
+                        self.timeouts[name]+=1
+                        self.failed(name,wall,'get_state request timed out; retrying')
                     continue
                 if wall<self.next_poll[name]:
                     continue
-                self.next_poll[name]=wall+.25
+                self.next_poll[name]=wall+self.poll_period_s
                 if not client.service_is_ready():
                     self.states[name]=dict(error='get_state service unavailable')
                     continue
                 self.pending[name]=(client.call_async(GetState.Request()),wall)
             except Exception as exc:
                 self.pending.pop(name,None)
-                self.next_poll[name]=wall+.25
-                self.states[name]=dict(error='get_state failed: '+str(exc))
+                self.failed(name,wall,'get_state failed: '+str(exc))
 
 
-def wait_active(poll, timeout, spin, *, clock=time.monotonic, ok=rclpy.ok, report=print):
+def startup_failure(log_path):
+    if log_path is None:
+        return None
+    try:
+        lines=Path(log_path).read_text(errors='replace').splitlines()
+    except OSError:
+        return None
+    return next((line for line in reversed(lines)
+                 if any(marker in line for marker in STARTUP_FAILURE_MARKERS)),None)
+
+
+def wait_active(poll, timeout, spin, *, clock=time.monotonic, ok=rclpy.ok, report=print,
+                startup_log=None):
     deadline=clock()+timeout
     last_reason=None
     while ok() and clock()<deadline:
+        failure=startup_failure(startup_log)
+        if failure is not None:
+            report('Lifecycle startup aborted; owned group must be restarted: '+failure)
+            return False
         wall=clock()
         poll.tick(wall)
         ready,reason=readiness(poll.states,wall,names=tuple(poll.clients))
@@ -87,6 +135,8 @@ def main():
     parser.add_argument('--timeout',type=float,default=30.)
     parser.add_argument('--nodes',nargs='+',default=list(NAMES),
                         help='Lifecycle node names whose ACTIVE state is required')
+    parser.add_argument('--startup-log',type=Path,
+                        help='Exit early if this attempt\'s lifecycle manager aborts bringup')
     args=parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout<=0:
         parser.error('--timeout must be finite and positive')
@@ -95,14 +145,22 @@ def main():
         parser.error('--nodes requires distinct nonempty node names')
     rclpy.init()
     node=Node('r3_wait_localization_active')
+    executor=SingleThreadedExecutor()
+    executor.add_node(node)
     try:
-        poll=LifecyclePoll({name:node.create_client(GetState,f'/{name}/get_state') for name in names})
-        active=wait_active(poll,args.timeout,lambda seconds:rclpy.spin_once(node,timeout_sec=seconds),
-                           report=lambda message:print(message,flush=True))
+        def recreate(name,client):
+            node.destroy_client(client)
+            return node.create_client(GetState,f'/{name}/get_state')
+        poll=LifecyclePoll({name:node.create_client(GetState,f'/{name}/get_state') for name in names},
+                           poll_period_s=.5,recreate_client=recreate)
+        active=wait_active(poll,args.timeout,lambda seconds:executor.spin_once(timeout_sec=seconds),
+                           report=lambda message:print(message,flush=True),startup_log=args.startup_log)
         return 0 if active else 2
     except KeyboardInterrupt:
         return 2
     finally:
+        executor.remove_node(node)
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

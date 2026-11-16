@@ -5,12 +5,13 @@ before the A->C follower and its collision monitor are started.
 """
 import math
 from pathlib import Path
+import sys
 import tempfile
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import OpaqueFunction
+from launch.actions import ExecuteProcess, OpaqueFunction
 from launch_ros.actions import Node
 
 
@@ -41,6 +42,9 @@ def navigation_parameters():
         yaw_goal_tolerance=math.radians(4.),stateful=False,
         plugin='nav2_controller::StoppedGoalChecker',
         rot_stopped_velocity=.02,trans_stopped_velocity=.015)
+    # A brief transform check keeps the same action alive while commands
+    # brake to zero; it must not exhaust the normal five-second progress lease.
+    control['progress_checker']['movement_time_allowance']=15.
     # Retain the real drivetrain's active speed floor. The previous 0.05 m/s
     # approach and 0.20 rad/s cap were below the existing controller's loaded
     # translation/rotation floors and could produce ineffective commands.
@@ -97,13 +101,16 @@ def navigation_actions(context):
         if name in ('controller_server','behavior_server'):
             remaps.append(('cmd_vel','cmd_vel_nav'))
         if name=='velocity_smoother':
-            remaps.append(('cmd_vel','cmd_vel_nav'))
+            remaps.append(('cmd_vel','cmd_vel_nav_checked'))
             remaps.append(('cmd_vel_smoothed','/cmd_vel_smoothed'))
         nodes.append(Node(package=package,executable=name,name=name,output='screen',
                           parameters=[filename],remappings=remaps))
     nodes.append(Node(package='nav2_lifecycle_manager',executable='lifecycle_manager',
         name='lifecycle_manager_navigation',output='screen',parameters=[dict(use_sim_time=False,
             autostart=True,node_names=[name for _,name in specs],bond_timeout=4.)]))
+    root = Path(__file__).resolve().parents[3]
+    nodes.append(ExecuteProcess(cmd=[sys.executable,
+        str(root/'simulation/r3_navigation_recovery_gate.py')],output='screen'))
     return nodes
 
 

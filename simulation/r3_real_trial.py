@@ -4,8 +4,8 @@
 The locked RGB-D target is used once to build a frozen plan. During motion,
 Wheel/IMU EKF odom supplies XY and yaw; raw IMU is diagnostic only. The
 filtered LiDAR scan may stop, never steer, the robot.
-The current one-command diagnostic brakes before C and does not remeasure the
-pallet there. No straight insertion or lift is commanded in that mode.
+The one-command workflow completes the APPROACH at C without entering the
+STRAIGHT insertion phase. The legacy diagnostic can still brake before C.
 """
 
 import argparse
@@ -222,11 +222,12 @@ def check_c_rgbd(samples, odom_gap_m, odom_yaw_error_rad, now):
 
 
 class RealTrial(Node):
-    def __init__(self, plan, output, stop_at_c=False, control_timer=True):
+    def __init__(self, plan, output, stop_at_c=False, control_timer=True, arrive_at_c=False):
         super().__init__('r3_real_fixed_plan_trial')
         self.plan = plan
         self.output = output
         self.stop_at_c = stop_at_c
+        self.arrive_at_c = arrive_at_c
         self.geometry = json.loads(plan.geometry_json)
         self.target = json.loads(plan.target_json)['pose']
         self.localization = localization_spec(json.loads(plan.target_json))
@@ -239,7 +240,8 @@ class RealTrial(Node):
         self.last_control_pose = None
         self.heading_source = 'amcl_odom_ekf' if self.localization else 'odom_ekf'
         self.phases = json.loads(plan.phases_json)
-        self.follow = FixedPlanFollower(self.phases, self.target, self.geometry)
+        self.follow = FixedPlanFollower(self.phases, self.target, self.geometry,
+                                        approach_only=arrive_at_c)
         self.pose = None
         self.twist = None
         self.odom_wall = 0.
@@ -272,6 +274,7 @@ class RealTrial(Node):
         self.c_wait_started = None
         self.c_verified = None
         self.c_rgbd_report = None
+        self.c_arrival_report = None
         self.c_last_issue = 'no fresh pallet RGB-D at C'
         self.c_braking_since = None
         self.input_revision = 0
@@ -589,18 +592,19 @@ class RealTrial(Node):
         dt = max(.001, min(.10, wall - self.last_tick))
         self.last_tick = wall
         camera_verified = self.c_verified is not None
-        if self.stop_at_c and self.c_braking_since is not None:
+        if (self.stop_at_c or self.arrive_at_c) and self.c_braking_since is not None:
             self.send()
             e = errors(control_pose, self.target, self.geometry)
             still = (self.twist and abs(self.twist[0]) < .005 and abs(self.twist[1]) < .005
-                     and (not self.localization or self.localization_status.get('correction_settled') is True))
+                     and (self.arrive_at_c or not self.localization
+                          or self.localization_status.get('correction_settled') is True))
             clearance = e['gap_m']-self.geometry['fork_length']
             settling_time = wall-self.c_braking_since
             report_needed = (clearance < self.follow.min_straight_entry_clearance_m
                              or (not still and settling_time >= 2.0)
                              or (still and settling_time >= .5))
             if report_needed:
-                print('KẾT QUẢ DỪNG TRƯỚC C: ' + json.dumps(dict(
+                print(('KẾT QUẢ TẠI C: ' if self.arrive_at_c else 'KẾT QUẢ DỪNG TRƯỚC C: ') + json.dumps(dict(
                     control_yaw_error_deg=round(math.degrees(e['yaw_error_rad']), 2),
                     imu_yaw_error_deg=round(math.degrees(
                         errors(imu_reference_pose, self.target, self.geometry)['yaw_error_rad']), 2),
@@ -615,7 +619,27 @@ class RealTrial(Node):
             elif not still and settling_time >= 2.0:
                 self.fail('robot did not settle within 2 s after braking before C')
             elif still and settling_time >= .5:
-                if (abs(e['ey_m']) > self.geometry['max_lateral']
+                if self.arrive_at_c:
+                    end = self.phases[0]['poses'][-1]
+                    xy_error = math.dist(control_pose[:2], end[:2])
+                    yaw_error = abs(math.degrees(wrap(control_pose[2]-end[2])))
+                    self.c_arrival_report = dict(position_error_m=xy_error,
+                        heading_error_deg=yaw_error, fork_tip_clearance_m=clearance,
+                        position_tolerance_m=self.follow.c_position_tolerance_m,
+                        heading_tolerance_deg=self.follow.c_heading_tolerance_deg,
+                        amcl_correction_settled=(self.localization_status or {}).get('correction_settled'),
+                        insertion_alignment_satisfied=(abs(e['ey_m']) <= self.geometry['max_lateral']
+                            and abs(math.degrees(e['yaw_error_rad'])) <= self.geometry['max_yaw_deg']),
+                        insertion_authorized=False, physical_alignment_verified=False)
+                    if (xy_error > self.follow.c_position_tolerance_m
+                            or yaw_error > self.follow.c_heading_tolerance_deg):
+                        # Finish the approach without another correction loop
+                        # or cancellation. Keep the remaining error visible;
+                        # this status is not a claim of qualified C alignment.
+                        self.state, self.finished = 'C_ALIGNMENT_WARNING', True
+                    else:
+                        self.state, self.finished = 'C_ARRIVED', True
+                elif (abs(e['ey_m']) > self.geometry['max_lateral']
                         or abs(math.degrees(e['yaw_error_rad'])) > self.geometry['max_yaw_deg']):
                     self.fail('odom alignment outside C diagnostic limits')
                 else:
@@ -663,7 +687,8 @@ class RealTrial(Node):
         if self.follow.state == 'STOP_LATCHED':
             self.fail(self.follow.reason)
             return
-        if self.stop_at_c and self.follow.state == 'C_SETTLE':
+        if ((self.stop_at_c and self.follow.state == 'C_SETTLE')
+                or (self.arrive_at_c and self.follow.state == 'C_REACHED')):
             self.c_braking_since = wall
             self.state = 'C_BRAKING'
             self.send()
@@ -756,7 +781,11 @@ def main():
                         help='Use a plan up to 0.10 m/s with explicit URDF/user geometry assumptions')
     parser.add_argument('--stop-at-c', action='store_true',
                         help='Brake before C without a second camera measurement or straight insertion')
+    parser.add_argument('--arrive-at-c', action='store_true',
+                        help='Complete APPROACH to C and stop there; never enter C-to-B')
     args = parser.parse_args()
+    if args.stop_at_c and args.arrive_at_c:
+        parser.error('choose only one of --stop-at-c and --arrive-at-c')
     target, geometry = read_real_target(args.plan, args.allow_provisional)
     data = json.loads(args.plan.read_text())
     plan = FrozenPlan(**{key: data[key] for key in
@@ -800,7 +829,9 @@ def main():
           f"{initial['ey_m']*100:+.2f} cm.", flush=True)
     print('  Giữ nguyên xe và pallet sau khi chốt kế hoạch; nếu đã kéo hoặc đẩy, hủy để đo lại.',
           flush=True)
-    if args.stop_at_c:
+    if args.arrive_at_c:
+        print('ĐÍCH C: chạy hết A→C rồi dừng tại C; không đưa càng vào hoặc nâng pallet.', flush=True)
+    elif args.stop_at_c:
         print('CHẨN ĐOÁN: phanh trước C khoảng 5 cm, ghi góc IMU và odom cuối; '
               'không chạy C→B, không nâng pallet.', flush=True)
     if not args.execute:
@@ -810,7 +841,9 @@ def main():
     if not sys.stdin.isatty():
         parser.error('real execution requires an interactive terminal to review the printed measurement')
     try:
-        prompt = ('Kế hoạch đã khóa; Enter để chạy chẩn đoán tới gần C, Ctrl+C để hủy: '
+        prompt = ('Kế hoạch đã khóa; Enter để chạy A→C, Ctrl+C để hủy: '
+                  if args.arrive_at_c else
+                  'Kế hoạch đã khóa; Enter để chạy chẩn đoán tới gần C, Ctrl+C để hủy: '
                   if args.stop_at_c else
                   'Kế hoạch đã khóa; Enter để kiểm tra cảm biến và chạy, Ctrl+C để hủy: ')
         input(prompt)
@@ -829,7 +862,8 @@ def main():
     try:
         monitor_ready()
         read_real_target(args.plan, args.allow_provisional, max_age_s=None)
-        node = RealTrial(plan, args.output, stop_at_c=args.stop_at_c, control_timer=False)
+        node = RealTrial(plan, args.output, stop_at_c=args.stop_at_c, control_timer=False,
+                         arrive_at_c=args.arrive_at_c)
         executor = SingleThreadedExecutor()
         executor.add_node(node)
         discovery_deadline = time.monotonic() + 20.
@@ -859,6 +893,8 @@ def main():
             diagnostics_report = node.diagnostics.write(args.output)
             (args.output/'mission_result.json').write_text(json.dumps({
                 'status': node.state, 'reason': node.reason,
+                'execution_mode': ('arrive_at_c' if node.arrive_at_c else
+                                   'stop_before_c' if node.stop_at_c else 'full_plan'),
                 'plan_id': plan.plan_id, 'odom_samples': len(node.rows),
                 'physical_alignment_verified': False,
                 'heading_source': node.heading_source,
@@ -880,8 +916,12 @@ def main():
                     if node.rows else None),
                 'c_rgbd_verification': node.c_verified,
                 'c_rgbd_measurement': node.c_rgbd_report,
+                'c_arrival': node.c_arrival_report,
                 'lift_commands': 0,
             }, indent=2))
+            print(json.dumps(dict(status=node.state, reason=node.reason,
+                                  c_arrival=node.c_arrival_report),
+                             ensure_ascii=False, indent=2), flush=True)
             executor.remove_node(node)
             executor.shutdown()
             node.destroy_node()

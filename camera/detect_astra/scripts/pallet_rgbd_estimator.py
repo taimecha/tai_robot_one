@@ -23,6 +23,8 @@ class RGBDTargetEstimator:
         self.depth_failures = 0
         self.last_seed_error = ''
         self.loss_reason = 'no YOLO seed received'
+        self.measurement_failure_since_ns = None
+        self.measurement_reacquisitions = 0
         # RGB only, never cached Depth/poses. Bridge a delayed semantic mask
         # through observed frames while preserving the 500-ms RGB gap gate.
         self.rgb_history = deque(maxlen=64)
@@ -41,6 +43,16 @@ class RGBDTargetEstimator:
         self.last_accepted_stamp_ns = None
         self.depth_failures = 0
         self.loss_reason = reason
+        self.measurement_failure_since_ns = None
+
+    def measurement_failed(self, stamp_ns):
+        if self.measurement_failure_since_ns is None:
+            self.measurement_failure_since_ns = stamp_ns
+
+    def needs_measurement_reacquisition(self, stamp_ns):
+        """A visually coherent mask can still be the wrong depth sample region."""
+        return (self.measurement_failure_since_ns is not None
+                and stamp_ns-self.measurement_failure_since_ns >= 1_000_000_000)
 
     def measure(self, mask, bbox, depth, intrinsics):
         a = self.args
@@ -88,8 +100,14 @@ class RGBDTargetEstimator:
         # Semantic detections acquire a target; do not replace a healthy RGB
         # reference on every inference. Mask jitter would move the depth sample
         # bands even with a stationary pallet. Recovery uses a fresh seed only
-        # after the visual tracker has actually lost the target.
-        if seed is not None and not self.tracker.active:
+        # after visual loss or a sustained lack of valid current geometry.
+        # In the latter case a fresh semantic mask is checked independently;
+        # an operator must not need to occlude the image to release a bad mask.
+        replace_failed_measurement = (self.tracker.active
+            and self.needs_measurement_reacquisition(stamp_ns)
+            and seed is not None and seed['stamp_ns'] > self.seed_stamp_ns
+            and seed['stamp_ns'] >= self.measurement_failure_since_ns)
+        if seed is not None and (not self.tracker.active or replace_failed_measurement):
             try:
                 max_seed_ns = int(getattr(self.args, 'max_seed_age_ms', 1000.)*1e6)
                 if not 0 <= stamp_ns - seed['stamp_ns'] <= max_seed_ns:
@@ -104,6 +122,9 @@ class RGBDTargetEstimator:
                     mask, bbox = candidate.update(image, stamp_ns)
                 proposed = self.measure(mask, bbox, depth, intrinsics)
                 self.tracker = candidate
+                if replace_failed_measurement:
+                    self.history.clear()
+                    self.measurement_reacquisitions += 1
                 self.seed_stamp_ns = seed['stamp_ns']
                 self.seed_class = seed['class_name']
                 self.seed_confidence = seed['confidence']
@@ -122,6 +143,7 @@ class RGBDTargetEstimator:
             except ValueError as exc:
                 self.history.clear()
                 self.depth_failures += 1
+                self.measurement_failed(stamp_ns)
                 # Invalid Depth cannot produce a pose, but does not mean that
                 # the RGB tracker lost the pallet. Reconfirm fresh geometry
                 # after Depth returns, without requiring another YOLO seed.
@@ -137,9 +159,11 @@ class RGBDTargetEstimator:
             if position_ok:
                 # One noisy depth difference between the two legs must not
                 # discard a healthy RGB track or contaminate the median.
+                self.measurement_failed(stamp_ns)
                 raise ValueError('heading outlier; waiting for fresh RGB-D angle')
             self.reset('RGB-D geometry jumped')
             raise ValueError('LOST: RGB-D geometry jumped; enable YOLO to reacquire')
+        self.measurement_failure_since_ns = None
         self.history.append(measurement)
         self.last_accepted_stamp_ns=stamp_ns
         if len(self.history) < self.heading_filter_frames:

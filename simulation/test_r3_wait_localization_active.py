@@ -1,5 +1,7 @@
 """Lifecycle readiness failures and bounded retries; no ROS nodes or hardware."""
 import math
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
@@ -83,6 +85,49 @@ class LocalizationActiveTest(unittest.TestCase):
         self.assertEqual(set(poll.states),set(names))
         self.assertIn('bt_navigator',messages[-1])
         self.assertTrue(readiness(poll.states,now[0],names=names)[0])
+
+    def test_repeated_transport_failure_recreates_client_then_accepts_fresh_reply(self):
+        broken=Mock(service_is_ready=Mock(return_value=True))
+        broken.call_async.side_effect=RuntimeError('async_send_request failed')
+        repaired=self.clients()['amcl']
+        recreate=Mock(return_value=repaired)
+        poll=LifecyclePoll({'amcl':broken},recreate_client=recreate)
+        poll.tick(0.)
+        self.assertIn('failed',poll.states['amcl']['error'])
+        poll.tick(.3)
+        recreate.assert_called_once_with('amcl',broken)
+        poll.tick(.6);poll.tick(.7)
+        self.assertTrue(readiness(poll.states,.7,names=('amcl',))[0])
+        self.assertEqual(poll.diagnostics(.7)['amcl']['client_recreations'],1)
+        self.assertEqual(poll.pending,{})
+
+    def test_a_late_reply_from_a_timed_out_request_cannot_replace_the_new_state(self):
+        old=future(done=False)
+        old.cancel=Mock()
+        clients=self.clients()
+        clients['amcl'].call_async.side_effect=[old,future(state=2)]
+        poll=LifecyclePoll(clients)
+        poll.tick(0.);poll.tick(2.01)
+        old.cancel.assert_called_once()
+        old.done=lambda:True
+        poll.tick(2.3);poll.tick(2.4)
+        self.assertFalse(readiness(poll.states,2.4)[0])
+        self.assertEqual(poll.states['amcl']['id'],2)
+        old.result.assert_not_called()
+        self.assertEqual(poll.diagnostics(2.4)['amcl']['request_timeouts'],1)
+
+    def test_aborted_native_bringup_returns_early_instead_of_waiting_60_seconds(self):
+        poll=LifecyclePoll(self.clients())
+        with tempfile.TemporaryDirectory() as tmp:
+            logfile=Path(tmp)/'navigation.log'
+            logfile.write_text('velocity_smoother/get_state async_send_request failed\n'
+                '[lifecycle_manager] Failed to bring up all requested nodes. Aborting bringup.\n')
+            messages=[]
+            spin=Mock()
+            self.assertFalse(wait_active(poll,60.,spin,clock=lambda:1.,ok=lambda:True,
+                report=messages.append,startup_log=logfile))
+            spin.assert_not_called()
+            self.assertIn('startup aborted',messages[-1])
 
 
 if __name__=='__main__':

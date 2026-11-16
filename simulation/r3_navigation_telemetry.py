@@ -8,10 +8,11 @@ from pathlib import Path
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
 from geometry_msgs.msg import Twist,TwistStamped,PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
+from std_msgs.msg import String
 
 
 def finite(value):
@@ -25,7 +26,7 @@ class NavigationTelemetry(Node):
         self.file=output.open('w',buffering=65536);self.latest={};self.ticks=0
         self.file.write(json.dumps(dict(schema='r3_navigation_motion_v1',
             observer_only=True,robot_commands_from_this_process=0))+'\n')
-        for topic in ['/cmd_vel_nav','/cmd_vel_smoothed','/cmd_vel_safe']:
+        for topic in ['/cmd_vel_nav','/cmd_vel_nav_checked','/cmd_vel_smoothed','/cmd_vel_safe']:
             self.create_subscription(Twist,topic,
                 lambda m,t=topic:self.command(t,m),qos_profile_sensor_data)
         self.create_subscription(TwistStamped,'/base_controller/cmd_vel_out',
@@ -35,6 +36,8 @@ class NavigationTelemetry(Node):
                 lambda m,t=topic:self.odometry(t,m),qos_profile_sensor_data)
         self.create_subscription(Imu,'/imu',self.imu,qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped,'/amcl_pose',self.amcl,qos_profile_sensor_data)
+        self.create_subscription(String, '/pallet/r3/localization/status', self.localization,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_timer(.05,self.record)
     def now(self):return self.get_clock().now().nanoseconds*1e-9
     @staticmethod
@@ -55,6 +58,14 @@ class NavigationTelemetry(Node):
         p=msg.pose.pose
         self.latest['/amcl_pose']=dict(stamp_ros_s=self.stamp(msg),x=finite(p.position.x),
             y=finite(p.position.y),yaw=self.yaw(p.orientation))
+    def localization(self,msg):
+        try:
+            value=json.loads(msg.data)
+            self.latest['localization_recovery']={key:value.get(key) for key in (
+                'published_ros_s','run_id','role','ready','localization_fault',
+                'navigation_recovery','map_update_event','amcl_pipeline')}
+        except (ValueError, TypeError, AttributeError):
+            pass
     def record(self):
         self.file.write(json.dumps(dict(ros_s=self.now(),**self.latest),allow_nan=False)+'\n')
         self.ticks+=1

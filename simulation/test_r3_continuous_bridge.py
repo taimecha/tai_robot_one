@@ -462,7 +462,7 @@ class ContinuousBridgeTest(unittest.TestCase):
                 self.assertFalse(node.stream_recovery_ready(100.,100.,problem!='tf'))
                 self.assertFalse(node.stream_recovery_ready(100.1,101.1,problem!='tf'))
 
-    def test_navigation_monitor_omits_short_trial_total_bound_but_retains_jump_guard(self):
+    def test_navigation_monitor_recovers_jump_while_trial_keeps_strict_limits(self):
         monitor=self.bridge(monitor=True)
         trial=self.bridge(monitor=False)
         self.assertFalse(monitor.correction.bound_total)
@@ -481,7 +481,9 @@ class ContinuousBridgeTest(unittest.TestCase):
         self.now=self.wall=101.
         self.odom(monitor,v=.05)
         self.observe(monitor,correction=(2.,2.,.3))
-        self.assertIn('jumped',monitor.correction.fault)
+        self.assertIsNone(monitor.correction.fault)
+        self.assertTrue(monitor.correction.navigation_recovery['hold_commands'])
+        self.assertEqual(monitor.correction.last_jump['candidate_amcl_stamp_s'], 101.)
 
     def test_continuous_scan_score_uses_more_actual_endpoints_without_changing_thresholds(self):
         node=self.bridge()

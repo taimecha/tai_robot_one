@@ -474,6 +474,8 @@ class AmclBridgeTest(unittest.TestCase):
                                          covariance(),now,now)
                 bridge.active=bridge.map_received=True
                 bridge.scan_match=dict(ready=True,reason='synthetic scan-map fit')
+                bridge.state_poll.states['amcl']=dict(id=3,stamp=time.monotonic())
+                bridge.next_state=float('inf')
                 bridge.poll_services(time.monotonic())
                 bridge.initial_pub.publish.assert_not_called()
                 bridge.last_tick=time.monotonic()-.05

@@ -1051,7 +1051,7 @@ class RecognitionGoal(Node):
         return future.result()
 
     def monitor_navigation_session(self):
-        """Keep identity/jump faults fatal; native Nav2 owns live TF health.
+        """Keep identity faults fatal; the bridge owns jump recovery.
 
         A delayed Python quality report is not a velocity interlock. The
         native controller, costmaps and collision monitor use current TF and
@@ -1070,13 +1070,26 @@ class RecognitionGoal(Node):
             raise ValueError('localization role changed during navigation')
         if status.get('localization_fault'):
             raise ValueError('localization fault during navigation: '+str(status['localization_fault']))
+        recovery=status.get('navigation_recovery') or {}
+        holding=recovery.get('hold_commands') is True
+        if holding != getattr(self,'navigation_recovery_hold',False):
+            self.navigation_recovery_hold=holding
+            if hasattr(self,'get_logger'):
+                self.get_logger().info(
+                    'Đang kiểm tra lại định vị bằng scan mới; tạm giữ lệnh, giữ nguyên goal A.'
+                    if holding else 'Định vị đã nhất quán; tiếp tục cùng goal A.')
+        if recovery.get('started_ros_s') is not None:
+            self.last_navigation_recovery=copy.deepcopy(recovery)
         snapshot=self.stationary_snapshot
         if snapshot is None:
             return
         stamp=snapshot['amcl_stamp_s']
         if self.navigation_observation_stamp is None or stamp>self.navigation_observation_stamp:
             map_odom=tuple(snapshot['map_odom_xyyaw'])
-            validate_map_update(self.last_map_odom,map_odom)
+            # The navigation-only bridge checks anomalous corrections with
+            # new scans while holding the command chain. A validated release
+            # must not trigger this second permanent cancellation afterwards.
+            # The saved-A quality gate still checks the final stationary pose.
             self.last_map_odom=map_odom
             self.navigation_observation_stamp=stamp
 
@@ -1238,6 +1251,7 @@ class RecognitionGoal(Node):
                         particle_metrics=self.particle_gate.metrics,
                         localization_evidence=self.localization_evidence(),
                         arrival_attempts=self.navigation_finalization,
+                        localization_recovery=getattr(self,'last_navigation_recovery',None),
                         physical_alignment_verified=False)
         finally:
             self.navigation_action_active=False

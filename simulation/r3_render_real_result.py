@@ -51,7 +51,10 @@ def render(plan_path, trial_dir, output, view='laptop'):
     geometry = json.loads(plan.geometry_json)
     target = json.loads(plan.target_json)['pose']
     phases = json.loads(plan.phases_json)
-    planned_base = [tuple(p) for phase in phases for p in phase['poses']]
+    approach_only = (mission.get('execution_mode') == 'arrive_at_c'
+                     or mission.get('status') in ('C_ARRIVED', 'C_ALIGNMENT_WARNING'))
+    displayed_phases = phases[:1] if approach_only else phases
+    planned_base = [tuple(p) for phase in displayed_phases for p in phase['poses']]
     planned_fork = [fork_for_base(p, geometry) for p in planned_base]
     odom = [(float(row['x_m']), float(row['y_m'])) for row in rows]
     final_odom_yaw = float(rows[-1]['yaw_rad'])
@@ -115,8 +118,9 @@ def render(plan_path, trial_dir, output, view='laptop'):
         ax.plot([p[0] for p in raw_xy],[p[1] for p in raw_xy],color='#64748b',linewidth=1.4,
                 linestyle=':',label='Odom encoder + IMU · gắn mốc A',zorder=3)
 
-    a, c, b = planned_base[0], phases[-1]['poses'][0], planned_base[-1]
-    for name, pose in (('A', a), ('C', c), ('B', b)):
+    a, c, b = planned_base[0], phases[0]['poses'][-1], phases[-1]['poses'][-1]
+    waypoints = (('A', a), ('C', c)) if approach_only else (('A', a), ('C', c), ('B', b))
+    for name, pose in waypoints:
         display_pose = pallet_view(pose, target)
         ax.scatter(display_pose[0], display_pose[1], s=35, facecolor='#172554', zorder=6)
         ax.annotate(name, display_pose, xytext=(7, 7), textcoords='offset points',
@@ -149,9 +153,12 @@ def render(plan_path, trial_dir, output, view='laptop'):
     control_turn = math.degrees(wrap(final_control_yaw-a[2]))
     odom_final_yaw = math.degrees(wrap(final_odom_yaw-target[2]))
     tip_clearance_cm = 100*(final_error['gap_m']-geometry['fork_length'])
-    status_label = 'ĐÃ DỪNG TRƯỚC C' if status == 'C_DIAGNOSTIC_DONE' else status
+    status_label = ('ĐÃ TỚI C' if status == 'C_ARRIVED' else
+                    'ĐÃ HẾT A→C · CÒN SAI SỐ C' if status == 'C_ALIGNMENT_WARNING' else
+                    'ĐÃ DỪNG TRƯỚC C' if status == 'C_DIAGNOSTIC_DONE' else status)
     view_label = 'GÓC NHÌN LAPTOP' if view == 'laptop' else 'GÓC NHÌN ROS'
-    ax.set_title(f'SƠ ĐỒ ƯỚC LƯỢNG A → C → B · {status_label} · {view_label}\n'
+    path_label = 'A → C' if approach_only else 'A → C → B'
+    ax.set_title(f'SƠ ĐỒ ƯỚC LƯỢNG {path_label} · {status_label} · {view_label}\n'
                  f'Pallet: RGB-D khóa tại A  |  Xe: odom X/Y + góc {heading_label}  |  '
                  'không đo lại pallet lúc dừng\n'
                  f'Góc camera tại A {initial_yaw:+.2f}° + quay {heading_label} {control_turn:+.2f}° '

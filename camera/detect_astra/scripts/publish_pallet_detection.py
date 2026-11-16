@@ -46,6 +46,7 @@ class DetectionNode(Node):
         self.input_age_ms = None
         self.result_age_ms = None
         self.last_issue = ''
+        self.last_issue_log_wall = 0.
         self.rgbd_health = RGBDHealth()
         self.measure_after_ros = None
         self.goal_gate = (RecognitionGoalGate(self.get_clock().now().nanoseconds/1e9)
@@ -358,6 +359,11 @@ class DetectionNode(Node):
             return
         with self.lock:
             self.last_issue = '' if detection.valid else detection.status
+        # Record why repeated inference produces no seed. Otherwise the target
+        # log only repeats its old loss reason, hiding the actual blocker.
+        if not detection.valid and time.monotonic()-self.last_issue_log_wall >= 2.:
+            self.get_logger().warn('YOLO chưa có seed pallet hợp lệ: ' + detection.status)
+            self.last_issue_log_wall = time.monotonic()
         if self.preview_publisher.get_subscription_count():
             visible = [i for i, cls in enumerate(classes)
                        if result.names[int(cls)].strip().lower() not in PALLET_CLASSES or i in indices]

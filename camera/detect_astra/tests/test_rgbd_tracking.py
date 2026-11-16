@@ -145,6 +145,86 @@ class RGBDTrackingTest(unittest.TestCase):
             estimator.process(self.image, self.depth, self.intrinsics, seed['stamp_ns'], seed)
         self.assertEqual(estimator.seed_stamp_ns, seed['stamp_ns'])
 
+    def test_prolonged_bad_geometry_can_reseed_without_occluding_the_image(self):
+        from unittest.mock import patch
+        estimator = RGBDTargetEstimator(self.args)
+        for i in range(3):
+            try:
+                estimator.process(self.image, self.depth, self.intrinsics,
+                                  1_000_000_000+i*100_000_000,
+                                  self.seed() if i == 0 else None)
+            except ValueError as exc:
+                self.assertIn('confirming front legs', str(exc))
+        original_measure = estimator.measure
+
+        # RGB flow remains coherent, but the old semantic sample region has
+        # persistently invalid current geometry. A new seed supplies the same
+        # physical pallet at a slightly different valid sample region.
+        def current_geometry(mask, bbox, depth, intrinsics):
+            if bbox[0] < self.bbox[0]+1.:
+                raise ValueError('insufficient valid depth in old semantic mask')
+            return original_measure(mask, bbox, depth, intrinsics)
+
+        with patch.object(estimator, 'measure', side_effect=current_geometry):
+            for i in range(3, 15):
+                with self.assertRaisesRegex(ValueError, 'insufficient valid depth'):
+                    estimator.process(self.image, self.depth, self.intrinsics,
+                                      1_000_000_000+i*100_000_000)
+                self.assertTrue(estimator.tracker.active)
+            fresh = self.seed()
+            fresh['stamp_ns'] = 2_500_000_000
+            fresh['mask'] = np.roll(self.mask, 2, axis=1)
+            fresh['bbox'] = self.bbox+np.array([2, 0, 2, 0])
+            for i in range(3):
+                stamp = fresh['stamp_ns']+i*100_000_000
+                if i < 2:
+                    with self.assertRaisesRegex(ValueError, 'confirming front legs'):
+                        estimator.process(self.image, self.depth, self.intrinsics,
+                                          stamp, fresh if i == 0 else None)
+                else:
+                    measurement = estimator.process(self.image, self.depth,
+                                                    self.intrinsics, stamp)
+            self.assertEqual(estimator.seed_stamp_ns, fresh['stamp_ns'])
+            self.assertEqual(estimator.measurement_reacquisitions, 1)
+            self.assertGreater(measurement['camera_forward_m'], 0.)
+            self.assertEqual(len(estimator.history), 3)
+
+    def test_a_short_depth_gap_keeps_the_original_semantic_reference(self):
+        estimator = RGBDTargetEstimator(self.args)
+        for i in range(3):
+            try:
+                estimator.process(self.image, self.depth, self.intrinsics,
+                                  1_000_000_000+i*100_000_000,
+                                  self.seed() if i == 0 else None)
+            except ValueError:
+                pass
+        for i in range(3, 7):
+            with self.assertRaisesRegex(ValueError, 'insufficient valid depth'):
+                estimator.process(self.image, self.depth*0, self.intrinsics,
+                                  1_000_000_000+i*100_000_000)
+        fresh = self.seed(); fresh['stamp_ns'] = 1_700_000_000
+        with self.assertRaisesRegex(ValueError, 'confirming front legs'):
+            estimator.process(self.image, self.depth, self.intrinsics, fresh['stamp_ns'], fresh)
+        self.assertEqual(estimator.seed_stamp_ns, 1_000_000_000)
+        self.assertEqual(estimator.measurement_reacquisitions, 0)
+
+    def test_a_new_seed_does_not_make_invalid_current_depth_valid(self):
+        estimator = RGBDTargetEstimator(self.args)
+        for i in range(3):
+            try:
+                estimator.process(self.image, self.depth, self.intrinsics,
+                                  1_000_000_000+i*100_000_000,
+                                  self.seed() if i == 0 else None)
+            except ValueError:
+                pass
+        for i in range(3, 16):
+            seed = self.seed(); seed['stamp_ns'] = 1_000_000_000+i*100_000_000
+            with self.assertRaisesRegex(ValueError, 'insufficient valid depth'):
+                estimator.process(self.image, self.depth*0, self.intrinsics,
+                                  seed['stamp_ns'], seed)
+        self.assertEqual(estimator.measurement_reacquisitions, 0)
+        self.assertEqual(len(estimator.history), 0)
+
     def test_camera_info_skew_rejects_pose_without_losing_rgb_target(self):
         from sensor_msgs.msg import Image, CameraInfo
         from builtin_interfaces.msg import Time

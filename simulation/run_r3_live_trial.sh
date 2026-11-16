@@ -150,6 +150,31 @@ stop_owned() {
   wait "$pid" 2>/dev/null || true
 }
 
+start_navigation() {
+  local attempt
+  for attempt in 1 2 3; do
+    echo "Khởi động Nav2 (lần $attempt/3); chưa gửi goal chuyển động."
+    setsid ros2 launch camera/detect_astra/launch/r3_navigation.launch.py \
+      >"$run_dir/navigation.log" 2>&1 &
+    navigation_pid=$!
+    if python3 simulation/r3_wait_localization_active.py --timeout 60 \
+        --nodes controller_server planner_server behavior_server velocity_smoother collision_monitor bt_navigator \
+        --startup-log "$run_dir/navigation.log" \
+        2>&1 | tee -a "$run_dir/navigation_activation.log"; then
+      return 0
+    fi
+    stop_owned "$navigation_pid"
+    navigation_pid=''
+    mv "$run_dir/navigation.log" "$run_dir/navigation_attempt_${attempt}.log"
+    if [[ $attempt -lt 3 ]]; then
+      echo 'Nav2 khởi động lỗi dịch vụ; đã đóng nhóm lỗi và tự thử lại, giữ nguyên AMCL và kết quả khớp bản đồ.' >&2
+      sleep 1
+    fi
+  done
+  echo "Không kích hoạt được Nav2 sau 3 lần; xem $run_dir/navigation_attempt_*.log. Chưa gửi goal." >&2
+  return 2
+}
+
 wait_for_localization() {
   local ready_file=$1
   local bridge_log=$2
@@ -162,7 +187,7 @@ wait_for_localization() {
     fi
     kill -0 "$bringup_pid" 2>/dev/null || { echo 'Bringup đã dừng; xem bringup.log' >&2; return 1; }
     if (( SECONDS >= deadline )); then
-      echo "Không đạt định vị LiDAR/bản đồ sau $localization_timeout giây; xe không chạy. Xem $bridge_log; nếu tìm toàn bản đồ còn mơ hồ, đặt 2D Pose Estimate trong RViz hoặc chạy lại với --initial-pose X Y YAW_DEG." >&2
+      echo "Không đạt định vị sau $localization_timeout giây; xe không chạy. Xem $bridge_log để phân biệt lỗi dịch vụ ROS và lỗi khớp LiDAR/bản đồ." >&2
       if [[ -r "$bridge_log" ]]; then tail -n 2 "$bridge_log" >&2; fi
       return 2
     fi
@@ -282,21 +307,23 @@ if [[ $localization == amcl ]]; then
     setsid ros2 launch camera/detect_astra/launch/r3_localization.launch.py map_file:="$map_file" \
       stationary_inspection:="$inspection_profile" \
       precision_localization:="$precision_profile" \
-      >>"$run_dir/localization.log" 2>&1 &
+      >"$run_dir/localization.log" 2>&1 &
     localization_pid=$!
     if python3 simulation/r3_wait_localization_active.py --timeout 30 \
+        --startup-log "$run_dir/localization.log" \
         2>&1 | tee -a "$run_dir/localization_activation.log"; then
       localization_active=1
       break
     fi
     stop_owned "$localization_pid"
     localization_pid=''
+    mv "$run_dir/localization.log" "$run_dir/localization_attempt_${localization_attempt}.log"
     if [[ $localization_attempt -lt 2 ]]; then
       echo 'Map server/AMCL chưa kích hoạt; đã đóng lượt lỗi, thử khởi động lại một lần.' >&2
     fi
   done
   [[ $localization_active -eq 1 ]] || {
-    echo "Không kích hoạt được map server/AMCL; xem $run_dir/localization.log. Phiên kết thúc." >&2
+    echo "Không kích hoạt được map server/AMCL; xem $run_dir/localization_attempt_*.log. Phiên kết thúc." >&2
     exit 2
   }
   echo 'Map server và AMCL đã ACTIVE; bản đồ đã sẵn sàng để RViz nhận.'
@@ -322,12 +349,7 @@ if [[ $localization == amcl ]]; then
   if [[ $nav_to_a -eq 1 ]]; then
     # Configure and activate Nav2 before the single parked AMCL refresh. Its
     # startup load must not interrupt the localization evidence being taught.
-    setsid ros2 launch camera/detect_astra/launch/r3_navigation.launch.py \
-      >"$run_dir/navigation.log" 2>&1 &
-    navigation_pid=$!
-    python3 simulation/r3_wait_localization_active.py --timeout 60 \
-      --nodes controller_server planner_server behavior_server velocity_smoother collision_monitor bt_navigator \
-      2>&1 | tee "$run_dir/navigation_activation.log"
+    start_navigation
     if [[ $nav_check_only -eq 0 ]]; then
       setsid python3 simulation/r3_navigation_telemetry.py --output "$run_dir/navigation_motion.jsonl" \
         >"$run_dir/navigation_telemetry.log" 2>&1 &
@@ -504,7 +526,7 @@ kill -0 "$safety_pid" 2>/dev/null || { echo 'Bộ dừng vật cản đã dừng
 
 set +e
 python3 simulation/r3_real_trial.py --plan "$plan" --output "$run_dir/trial" \
-  --allow-provisional --execute --stop-at-c 2>&1 | tee "$run_dir/trial.log"
+  --allow-provisional --execute --arrive-at-c 2>&1 | tee "$run_dir/trial.log"
 trial_rc=${PIPESTATUS[0]}
 set -e
 [[ $trial_rc -eq 0 ]] || exit "$trial_rc"
@@ -514,7 +536,11 @@ if [[ ! -f "$run_dir/trial/mission_result.json" ]]; then
 fi
 mission_status=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' \
   "$run_dir/trial/mission_result.json")
-if [[ "$mission_status" == C_DIAGNOSTIC_DONE ]]; then
+if [[ "$mission_status" == C_ARRIVED ]]; then
+  echo 'Đã hoàn thành A→C và dừng tại C; chưa đưa càng vào hoặc nâng pallet.'
+elif [[ "$mission_status" == C_ALIGNMENT_WARNING ]]; then
+  echo 'Đã đi hết đoạn A→C và dừng; còn sai số tại C được ghi trong c_arrival, không tự xoay chỉnh thêm.'
+elif [[ "$mission_status" == C_DIAGNOSTIC_DONE ]]; then
   echo 'Đã dừng chẩn đoán trước C; chưa đưa càng vào pallet. Xem góc odom cuối và ảnh.'
 elif [[ "$mission_status" != DONE_TRACKING ]]; then
   echo "Xe dừng ở trạng thái $mission_status; ảnh sẽ ghi quỹ đạo odom đã đi." >&2
